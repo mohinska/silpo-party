@@ -29,3 +29,10 @@ export class PlanningConfigurationError extends Error {
     this.name = "PlanningConfigurationError";
   }
 }
+
+export class PlanningProviderError extends Error {
+  constructor() {
+    super("AI planning provider request failed.");
+    this.name = "PlanningProviderError";
+  }
+}

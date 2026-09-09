@@ -1,4 +1,9 @@
-# Gemini Event Planning Agent Implementation Plan
+# Gemini Event Planning Agent Implementation Plan (Superseded)
+
+> Superseded on 2026-09-09 by
+> `docs/superpowers/plans/2026-09-09-participant-context-preprocessing.md`.
+> This file is retained only as implementation history for the original Gemini
+> foundation.
 
 > **For agentic workers:** Execute inline with strict red-green TDD. Do not
 > modify party-management, auth, database, or Supabase query code.

@@ -1,6 +1,3 @@
-import { tool } from "ai";
-import { z } from "zod";
-
 const SENSITIVE_KEY =
   /(access.?token|refresh.?token|authorization|cookie|password|secret|ciphertext|api.?key)/i;
 
@@ -13,7 +10,14 @@ export type ParticipantContextLoader = (
 ) => Promise<ParticipantContextResult>;
 
 export type ParticipantContextTraceEntry =
-  | { participantId: string; status: "available"; data: unknown }
+  | {
+      participantId: string;
+      status: "available";
+      sources?: string[];
+      restrictionCount?: number;
+      favoriteCount?: number;
+      ambiguousFragmentCount?: number;
+    }
   | { participantId: string; status: "unavailable"; reason: string };
 
 export function redactSensitiveData(value: unknown): unknown {
@@ -52,7 +56,7 @@ export function createParticipantContextAccess({
   const allowedIds = new Set(allowedParticipantIds);
   const trace: ParticipantContextTraceEntry[] = [];
 
-  async function execute({ participantId }: { participantId: string }) {
+  async function load({ participantId }: { participantId: string }) {
     if (!allowedIds.has(participantId)) {
       throw new Error(`Participant ${participantId} is not part of this event.`);
     }
@@ -63,7 +67,6 @@ export function createParticipantContextAccess({
         ? {
             participantId,
             status: "available",
-            data: redactSensitiveData(loaded.data),
           }
         : {
             participantId,
@@ -72,23 +75,13 @@ export function createParticipantContextAccess({
           };
 
     trace.push(entry);
-    return entry;
+    return loaded;
   }
 
-  return { execute, trace };
-}
+  async function execute({ participantId }: { participantId: string }) {
+    await load({ participantId });
+    return trace.at(-1)!;
+  }
 
-export function createParticipantContextTool(
-  access: ReturnType<typeof createParticipantContextAccess>,
-) {
-  return tool({
-    description:
-      "Fetch the current event participant's personal Silpo profile, food restrictions, and favorites. Missing data means unknown, not unrestricted.",
-    inputSchema: z.object({
-      participantId: z
-        .string()
-        .describe("Opaque participant ID copied exactly from the event input."),
-    }),
-    execute: access.execute,
-  });
+  return { execute, load, trace };
 }

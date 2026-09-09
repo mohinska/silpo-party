@@ -2,153 +2,120 @@
 
 ## Scope
 
-The module builds one event-level food plan with Gemini. It does not read or
-write the application database, manage rooms or permissions, write carts,
-select product packages, merge ingredients across dishes, or persist results.
+The module creates one event-level meal plan from a Host budget, participant
+intents, declared preferences, and independently normalized Silpo context. It
+does not manage rooms, permissions, persistence, carts, or checkout.
 
-The backend owns event membership, authorization, OAuth token lookup, and MCP
-client creation. It passes validated event data plus a callback that can fetch
-personal Silpo context for one participant at a time.
+The backend owns membership, authorization, OAuth token lookup, and MCP client
+creation. The planner receives neither credentials nor raw MCP responses.
 
-## Public contract
+## Pipeline
 
-The module exports:
+Each participant is processed independently:
 
-- `EventPlanningInputSchema` and `EventPlanningInput`
-- `EventPlanSchema` and `EventPlan`
-- `ParticipantContextLoader`
-- `planEvent(input, options)`
-- typed planning and safety errors
+```text
+Silpo MCP result
+→ deterministic bounded extraction
+→ optional semantic normalization
+→ UserFoodContextSchema
+```
 
-`planEvent` accepts event metadata, host, budget, participants, their declared
-preferences and restrictions, and food intent. A participant can optionally
-arrive with already-resolved Silpo context. When it is absent, the agent may use
-the participant context tool backed by `ParticipantContextLoader`.
+The event is then planned once:
 
-The loader receives only a participant ID and returns curated personal context
-or an explicit unavailable result. The AI module never receives OAuth tokens
-and never queries Supabase directly.
+```text
+event + Host budget + food intents + UserFoodContext[]
+→ GroupPlanningInputSchema
+→ group planner
+→ EventPlanSchema
+→ deterministic safety validation
+```
 
-## Input model
+At most three participant loaders run concurrently. Results remain ordered by
+the event participant list. A participant failure becomes explicit unavailable
+context and cannot be interpreted as an absence of restrictions.
 
-Event metadata contains an opaque event ID, title, optional description,
-ISO-8601 start time, locale, and optional meal notes. The host is represented
-by a participant ID and display name. Budget contains a positive amount and an
-ISO 4217 currency code.
+## MCP data minimization
 
-Each participant contains:
+The normalizer recognizes only `silpo_get_my_food_restrictions` and
+`silpo_get_my_favorites`. It ignores profile contact data, addresses, orders,
+purchase history, promotions, product details, loyalty data, and other tools.
 
-- opaque ID and display name;
-- allergies, always treated as hard constraints;
-- dietary restrictions with `hard` or `preference` strength;
-- likes, dislikes, cuisines, and free-form notes;
-- one food intent: no preference, a requested dish, or a recipe URL with
-  optional extracted recipe text;
-- optional curated Silpo profile, food restrictions, and favorites;
-- context completeness: `complete`, `partial`, or `unknown`.
+External MCP data is `unknown` only at the transport edge. The deterministic
+extractor prefers structured content, otherwise parses bounded JSON text,
+rejects sensitive keys, caps traversal and collection sizes, and creates
+compact source evidence. Raw responses never enter model prompts or traces.
 
-A missing field never means that the participant has no restrictions. A bare
-recipe URL is not treated as recipe content because the planning agent has no
-web-fetching responsibility.
+Semantic normalization is conditional. Unambiguous facts never invoke the
+normalizer model. Only bounded ambiguous food fragments plus compact extracted
+signals can be sent to it. Declared hard constraints are merged afterward and
+cannot be removed by model output.
 
-## MCP context collection
+## Contracts
 
-The Gemini call receives a single AI SDK tool named
-`get_participant_silpo_context`. Its input is a participant ID constrained to
-the IDs in the current event. Its executor calls the injected
-`ParticipantContextLoader`.
+- `EventPlanningInputSchema`: backend-owned event, participants, declarations,
+  intents, and budget.
+- `ParticipantFoodSignalsSchema`: bounded deterministic output from external MCP
+  data.
+- `UserFoodContextSchema`: compact normalized participant constraints,
+  preferences, missing information, and evidence.
+- `GroupPlanningInputSchema`: the only input accepted by the main planner.
+- `EventPlanSchema`: dishes, eaters, conflicts, Host approval proposals,
+  participant insights, and hard-constraint checks.
 
-The prompt requires Gemini to inspect the whole event first, request missing
-Silpo context for every eligible participant, and only then produce one global
-plan. Already-provided context is not fetched again. A failed or unavailable
-lookup is represented explicitly and does not get interpreted as an absence of
-restrictions.
+All objects are strict. Text and arrays are bounded. Group refinements enforce
+unique participant IDs, Host membership, at most ten participants, and matching
+participant/context IDs.
 
-The eventual backend adapter is responsible for mapping a participant ID to
-that participant's authenticated Silpo MCP client and invoking the allowed
-`silpo_get_my_profile`, `silpo_get_my_food_restrictions`, and
-`silpo_get_my_favorites` functions.
+## Provider isolation
 
-## Structured plan
+`PlanningModelProvider` exposes separate model factories for participant
+normalization and group planning. Business logic imports no provider-specific
+model SDK.
 
-Gemini returns a Zod-constrained object containing:
+Production uses Alibaba Cloud Model Studio through `@ai-sdk/openai-compatible`
+and the international DashScope endpoint. Both roles default to
+`qwen3.8-flash` and can be changed independently:
 
-- overall status: `ready`, `needs_input`, or `blocked`;
-- dishes with stable plan-local IDs, eater participant IDs, servings, and a
-  per-dish ingredient list;
-- conflicts with affected participants/dishes, severity, and status;
-- proposed resolutions linked to conflicts, including whether host approval or
-  participant input is required;
-- short event-level and dish-level reasoning summaries suitable for UI display;
-- hard-constraint checks for every proposed eater and every applicable allergy
-  or hard dietary restriction.
+```env
+AI_PROVIDER=alibaba
+AI_API_KEY=...
+AI_BASE_URL=https://dashscope-intl.aliyuncs.com/compatible-mode/v1
+AI_NORMALIZER_MODEL=qwen3.8-flash
+AI_PLANNER_MODEL=qwen3.8-flash
+```
 
-Ingredients remain scoped to their dish. Amounts may only be copied as source
-text supplied in the event context; the module does not calculate quantities or
-merge equivalent ingredients.
+Tests inject generation adapters or a model provider and require no network or
+credentials.
 
-## Hard-restriction safety
+## Planning and safety
 
-Safety is fail-closed and has two layers:
+The main model has no MCP tools. Its complete input is the validated compact
+group context. It must plan globally rather than concatenate per-person plans.
 
-1. The system prompt forbids assigning an eater to a dish that violates or has
-   uncertain compatibility with an allergy or hard restriction.
-2. A deterministic post-generation validator verifies participant references,
-   servings, and complete hard-constraint coverage for every eater.
+All normalized allergies and hard restrictions are absolute. For every eater,
+the output must contain a safe check for every applicable hard constraint.
+Deterministic validation rejects unknown references, duplicate identifiers,
+insufficient servings, incomplete participant insights, missing checks, and
+uncertain or conflicting assignments.
 
-Every required check must be `safe` and include a short explanation. A missing,
-`uncertain`, or `conflict` check makes the structured result invalid and raises
-a typed safety error. The result is never silently returned as a usable plan.
-The caller may ask for more participant information and run planning again.
+## Tracing and privacy
 
-Because free-form ingredient names cannot prove medical safety by string
-matching, the validator verifies explicit coverage rather than pretending to
-perform medical ingredient classification.
+Participant traces contain only participant ID, availability, source names,
+and counts of restrictions, favorites, and ambiguous fragments. Unavailable
+traces may contain a concise operational reason. They contain no raw payload,
+prompt, credential, personal contact value, or food-content excerpt.
 
-## Gemini orchestration
+## Debug route
 
-The implementation uses AI SDK `generateText`, Gemini through
-`@ai-sdk/google`, MCP-style AI SDK tools, a bounded multi-step tool loop, and
-`Output.object({ schema: EventPlanSchema })`.
-
-The model is configured by `GEMINI_MODEL` and defaults to
-`gemini-3.8-flash`. The Google provider receives the server-side API key
-explicitly from `GEMINI_API_KEY`; neither value is exposed through a
-`NEXT_PUBLIC_` variable. Tests inject the model call and participant loader, so
-they do not require network access or real credentials.
-
-## Error handling
-
-The public function distinguishes:
-
-- invalid backend input;
-- unavailable participant context;
-- model/provider or structured-output failure;
-- invalid participant/dish references;
-- hard-restriction safety failure.
-
-MCP context failures are disclosed to Gemini and must appear as missing context
-or conflicts in the plan. Secrets and raw OAuth data never appear in prompts,
-outputs, or errors.
-
-## Temporary authenticated debug page
-
-Until the event backend is available, `/ai-debug` provides an explicitly
-temporary, single-participant integration harness. It requires the existing
-authenticated user, constructs an in-memory event, and injects a loader that
-can only resolve that user's participant ID through the existing Silpo MCP
-helper.
-
-The page displays the redacted MCP payload returned to the agent, the curated
-participant context used for planning, tool execution trace, structured plan,
-and explicit errors. It performs no writes and never renders OAuth tokens or
-server environment values. Its source is isolated under the `ai-debug` route so
-it can be deleted without affecting the production agent contract.
+The temporary authenticated `/ai-debug` server action continues to use the real
+user's MCP session, but passes its result into the same preprocessing pipeline.
+Its planning trace is metadata-only. Frontend files are intentionally unchanged
+by this backend architecture revision.
 
 ## Verification
 
-Tests cover schema acceptance/rejection, tool participant isolation, global
-prompt requirements, output reference integrity, full hard-constraint coverage,
-rejection of unsafe or uncertain eater assignments, and debug-data redaction.
-TypeScript compilation, ESLint, and the production build provide integration
-checks.
+Unit tests cover schema boundaries, sensitive-data removal, unsupported tools,
+conditional semantic normalization, immutable declared constraints, unavailable
+context, provider configuration, participant concurrency, planner input
+minimization, and hard-constraint safety. TypeScript, ESLint, and the production
+build provide integration checks.

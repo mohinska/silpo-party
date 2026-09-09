@@ -2,6 +2,7 @@ import { z } from "zod";
 
 const NonEmptyText = z.string().trim().min(1);
 const OpaqueId = NonEmptyText.max(200);
+const BoundedText = NonEmptyText.max(500);
 
 export const AllergySchema = z
   .object({
@@ -114,7 +115,7 @@ export const EventPlanningInputSchema = z
         currency: z.string().regex(/^[A-Z]{3}$/),
       })
       .strict(),
-    participants: z.array(EventParticipantSchema).min(1),
+    participants: z.array(EventParticipantSchema).min(1).max(10),
   })
   .strict()
   .superRefine((input, context) => {
@@ -136,6 +137,150 @@ export const EventPlanningInputSchema = z
         message: "Host must be included in participants.",
       });
     }
+  });
+
+export const SourceEvidenceSchema = z
+  .object({
+    id: OpaqueId,
+    source: z.enum(["declared", "silpo_restrictions", "silpo_favorites"]),
+    fetchedAt: z.iso.datetime({ offset: true }).optional(),
+    fieldPath: NonEmptyText.max(300).optional(),
+  })
+  .strict();
+
+export const ParticipantFoodSignalsSchema = z
+  .object({
+    participantId: OpaqueId,
+    restrictions: z
+      .array(
+        z
+          .object({
+            label: BoundedText,
+            details: BoundedText.optional(),
+            kind: z.enum(["allergy", "hard_restriction", "preference", "dislike"]),
+            evidenceId: OpaqueId,
+          })
+          .strict(),
+      )
+      .max(50),
+    favorites: z
+      .array(
+        z
+          .object({
+            name: BoundedText,
+            category: BoundedText.optional(),
+            evidenceId: OpaqueId,
+          })
+          .strict(),
+      )
+      .max(100),
+    ambiguousFragments: z.array(BoundedText).max(20),
+    evidence: z.array(SourceEvidenceSchema).max(30),
+    completeness: z.enum(["complete", "partial", "unavailable"]),
+  })
+  .strict();
+
+const NormalizedFactSourceSchema = z.enum([
+  "declared",
+  "silpo_restrictions",
+  "silpo_favorites",
+  "semantic_normalizer",
+]);
+
+const NormalizedPreferenceSchema = z
+  .object({
+    label: BoundedText,
+    source: NormalizedFactSourceSchema,
+    evidenceIds: z.array(OpaqueId).max(5),
+  })
+  .strict();
+
+export const UserFoodContextSchema = z
+  .object({
+    participantId: OpaqueId,
+    hardConstraints: z
+      .array(
+        z
+          .object({
+            id: OpaqueId,
+            kind: z.enum(["allergy", "hard_restriction"]),
+            label: BoundedText,
+            details: BoundedText.optional(),
+            source: NormalizedFactSourceSchema,
+            evidenceIds: z.array(OpaqueId).max(5),
+          })
+          .strict(),
+      )
+      .max(30),
+    softPreferences: z.array(NormalizedPreferenceSchema).max(40),
+    dislikes: z.array(NormalizedPreferenceSchema).max(30),
+    usefulPatterns: z
+      .array(
+        z
+          .object({
+            label: BoundedText,
+            evidenceIds: z.array(OpaqueId).max(5),
+          })
+          .strict(),
+      )
+      .max(20),
+    missingInformation: z.array(BoundedText).max(20),
+    completeness: z.enum(["complete", "partial", "unavailable"]),
+    evidence: z.array(SourceEvidenceSchema).max(30),
+    summary: BoundedText,
+  })
+  .strict();
+
+export const GroupPlanningInputSchema = z
+  .object({
+    event: EventPlanningInputSchema.shape.event,
+    host: EventPlanningInputSchema.shape.host,
+    budget: EventPlanningInputSchema.shape.budget,
+    participants: z
+      .array(
+        z
+          .object({
+            id: OpaqueId,
+            displayName: NonEmptyText,
+            foodIntent: FoodIntentSchema,
+            contextStatus: z.enum(["provided", "loaded", "unavailable"]),
+            foodContext: UserFoodContextSchema,
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(10),
+  })
+  .strict()
+  .superRefine((input, context) => {
+    const ids = input.participants.map(({ id }) => id);
+    const uniqueIds = new Set(ids);
+
+    if (uniqueIds.size !== ids.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["participants"],
+        message: "Participant IDs must be unique.",
+      });
+    }
+
+    if (!uniqueIds.has(input.host.participantId)) {
+      context.addIssue({
+        code: "custom",
+        path: ["host", "participantId"],
+        message: "Host must be included in participants.",
+      });
+    }
+
+    input.participants.forEach((participant, index) => {
+      if (participant.foodContext.participantId !== participant.id) {
+        context.addIssue({
+          code: "custom",
+          path: ["participants", index, "foodContext", "participantId"],
+          message: "Food context must belong to its participant.",
+        });
+      }
+    });
   });
 
 export const PlanIngredientSchema = z
@@ -236,5 +381,10 @@ export const EventPlanSchema = z
 export type EventPlanningInput = z.infer<typeof EventPlanningInputSchema>;
 export type EventParticipant = z.infer<typeof EventParticipantSchema>;
 export type PersonalSilpoContext = z.infer<typeof PersonalSilpoContextSchema>;
+export type ParticipantFoodSignals = z.infer<
+  typeof ParticipantFoodSignalsSchema
+>;
+export type UserFoodContext = z.infer<typeof UserFoodContextSchema>;
+export type GroupPlanningInput = z.infer<typeof GroupPlanningInputSchema>;
 export type EventPlan = z.infer<typeof EventPlanSchema>;
 export type HardConstraintCheck = z.infer<typeof HardConstraintCheckSchema>;

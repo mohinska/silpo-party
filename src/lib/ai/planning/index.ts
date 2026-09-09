@@ -10,18 +10,32 @@ export type {
   ParticipantContextTraceEntry,
 } from "./context";
 export {
+  extractParticipantFoodSignals,
+  normalizeParticipantFoodContext,
+} from "./normalization";
+export type { ParticipantNormalizationAdapter } from "./normalization";
+export { createConfiguredPlanningProvider } from "./provider";
+export type { PlanningModelProvider } from "./provider";
+export {
   PlanningConfigurationError,
+  PlanningProviderError,
   PlanningSafetyError,
 } from "./errors";
 export type { PlanningSafetyIssue } from "./errors";
 export {
   EventPlanSchema,
   EventPlanningInputSchema,
+  GroupPlanningInputSchema,
+  ParticipantFoodSignalsSchema,
   PersonalSilpoContextSchema,
+  UserFoodContextSchema,
 } from "./schemas";
 export type {
   EventParticipant,
   EventPlan,
   EventPlanningInput,
+  GroupPlanningInput,
+  ParticipantFoodSignals,
   PersonalSilpoContext,
+  UserFoodContext,
 } from "./schemas";

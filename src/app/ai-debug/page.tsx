@@ -19,10 +19,10 @@ export default async function AiDebugPage() {
         <div className={styles.titleRow}>
           <div className={styles.pulse} aria-hidden="true" />
           <div>
-            <h1>Gemini × Сільпо</h1>
+            <h1>AI planning trace</h1>
             <p>
-              Тимчасовий приватний інспектор для {displayName}. Жодних записів
-              у кошик або базу даних.
+              Приватний інспектор для {displayName}: від MCP-запиту до фінальної
+              safety-перевірки.
             </p>
           </div>
         </div>

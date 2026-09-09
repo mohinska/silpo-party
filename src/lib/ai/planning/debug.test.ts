@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
 import { createSingleParticipantDebugInput, serializeDebugError } from "./debug";
 import { PlanningSafetyError } from "./errors";
@@ -24,6 +25,13 @@ describe("createSingleParticipantDebugInput", () => {
 });
 
 describe("serializeDebugError", () => {
+  it("uses provider-neutral wording for structured output failures", () => {
+    const error = new z.ZodError([]);
+
+    expect(serializeDebugError(error).message).toBe(
+      "AI model or backend data did not match the planning contract.",
+    );
+  });
   it("preserves machine-readable safety issues", () => {
     const result = serializeDebugError(
       new PlanningSafetyError([

@@ -38,7 +38,7 @@ describe("createParticipantContextAccess", () => {
     expect(access.trace).toEqual([result]);
   });
 
-  it("redacts sensitive fields before data reaches Gemini or the trace", async () => {
+  it("keeps raw MCP data out of the trace", async () => {
     const access = createParticipantContextAccess({
       allowedParticipantIds: ["p1"],
       loader: async () => ({
@@ -53,18 +53,8 @@ describe("createParticipantContextAccess", () => {
 
     const result = await access.execute({ participantId: "p1" });
 
-    expect(result).toEqual({
-      participantId: "p1",
-      status: "available",
-      data: {
-        profile: { favoriteStore: "Le Silpo" },
-        access_token: "[REDACTED]",
-        nested: {
-          clientSecretCiphertext: "[REDACTED]",
-          ordinaryKey: "kept",
-        },
-      },
-    });
+    expect(result).toEqual({ participantId: "p1", status: "available" });
+    expect(JSON.stringify(result)).not.toMatch(/Le Silpo|ordinaryKey|secret-token/);
     expect(access.trace).toEqual([result]);
   });
 });

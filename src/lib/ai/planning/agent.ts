@@ -1,153 +1,310 @@
-import { createGoogleGenerativeAI } from "@ai-sdk/google";
-import { generateText, isStepCount, Output } from "ai";
+import { generateText, Output } from "ai";
 
-import {
-  createParticipantContextAccess,
-  createParticipantContextTool,
-  type ParticipantContextLoader,
+import type {
+  ParticipantContextLoader,
+  ParticipantContextTraceEntry,
 } from "./context";
 import {
-  PlanningConfigurationError,
-  PlanningSafetyError,
-  type PlanningSafetyIssue,
-} from "./errors";
+  createPlanningDebugEmitter,
+  type PlanningDebugEventSink,
+} from "./debug-stream";
+import { PlanningProviderError } from "./errors";
+import {
+  extractParticipantFoodSignals,
+  normalizeParticipantFoodContext,
+  type ParticipantNormalizationAdapter,
+} from "./normalization";
 import { buildPlanningPrompt, PLANNING_SYSTEM_PROMPT } from "./prompt";
+import {
+  createConfiguredPlanningProvider,
+  type PlanningModelProvider,
+} from "./provider";
 import {
   EventPlanSchema,
   EventPlanningInputSchema,
+  GroupPlanningInputSchema,
+  ParticipantFoodSignalsSchema,
+  UserFoodContextSchema,
   type EventPlan,
   type EventPlanningInput,
+  type GroupPlanningInput,
+  type UserFoodContext,
 } from "./schemas";
 import { assertEventPlanSafety } from "./safety";
 
-type ParticipantContextAccess = ReturnType<
-  typeof createParticipantContextAccess
->;
-
 export type PlanGenerationAdapter = (request: {
-  input: EventPlanningInput;
-  contextAccess: ParticipantContextAccess;
+  input: GroupPlanningInput;
   system: string;
   prompt: string;
 }) => Promise<unknown>;
 
 export type PlanEventOptions = {
   loadParticipantContext?: ParticipantContextLoader;
+  normalizeParticipantContext?: ParticipantNormalizationAdapter;
   generatePlan?: PlanGenerationAdapter;
+  modelProvider?: PlanningModelProvider;
+  onDebugEvent?: PlanningDebugEventSink;
 };
 
 export type PlanningResult = {
   plan: EventPlan;
-  contextTrace: ParticipantContextAccess["trace"];
+  contextTrace: ParticipantContextTraceEntry[];
 };
 
-async function generatePlanWithGemini({
-  contextAccess,
-  system,
-  prompt,
-}: Parameters<PlanGenerationAdapter>[0]): Promise<unknown> {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new PlanningConfigurationError(
-      "GEMINI_API_KEY is required to run the Gemini planning agent.",
-    );
-  }
-
-  const google = createGoogleGenerativeAI({ apiKey });
-  const modelId = process.env.GEMINI_MODEL?.trim() || "gemini-3.8-flash";
-  const result = await generateText({
-    model: google(modelId),
-    system,
-    prompt,
-    tools: {
-      get_participant_silpo_context:
-        createParticipantContextTool(contextAccess),
-    },
-    stopWhen: isStepCount(12),
-    output: Output.object({ schema: EventPlanSchema }),
-  });
-
-  return result.output;
+function createDefaultNormalizer(
+  provider: PlanningModelProvider,
+): ParticipantNormalizationAdapter {
+  return async ({ participantId, signals }) => {
+    const result = await generateText({
+      model: provider.participantNormalizerModel(),
+      system:
+        "Normalize only the supplied bounded food signals. Do not invent allergies or treat missing data as unrestricted. Return concise Ukrainian summaries.",
+      prompt: `Return a normalized food context for ${participantId} as JSON: ${JSON.stringify(signals)}`,
+      output: Output.object({ schema: UserFoodContextSchema }),
+    });
+    return result.output;
+  };
 }
 
-function assertContextCollection(
-  input: EventPlanningInput,
-  plan: EventPlan,
-  trace: ParticipantContextAccess["trace"],
-) {
-  const issues: PlanningSafetyIssue[] = [];
-  const insightByParticipant = new Map(
-    plan.participantInsights.map((insight) => [insight.participantId, insight]),
+function createDefaultPlanner(
+  provider: PlanningModelProvider,
+): PlanGenerationAdapter {
+  return async ({ system, prompt }) => {
+    const result = await generateText({
+      model: provider.groupPlannerModel(),
+      system,
+      prompt,
+      output: Output.object({ schema: EventPlanSchema }),
+    });
+    return result.output;
+  };
+}
+
+async function mapWithConcurrency<T, R>(
+  values: T[],
+  limit: number,
+  mapper: (value: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(values.length);
+  let nextIndex = 0;
+  async function worker() {
+    while (nextIndex < values.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await mapper(values[index]);
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(limit, values.length) }, () => worker()),
   );
+  return results;
+}
 
-  for (const participant of input.participants) {
-    const entries = trace.filter(
-      (entry) => entry.participantId === participant.id,
-    );
-    const insight = insightByParticipant.get(participant.id);
-
-    if (participant.silpoContext) {
-      if (entries.length > 0 || insight?.contextStatus !== "provided") {
-        issues.push({
-          code: "constraint_mismatch",
-          message: `Participant ${participant.id} has supplied context but the plan did not mark it as provided.`,
-          participantId: participant.id,
-        });
-      }
-      continue;
-    }
-
-    if (entries.length !== 1) {
-      issues.push({
-        code: "missing_context",
-        message: `Gemini did not request Silpo context exactly once for participant ${participant.id}.`,
-        participantId: participant.id,
-      });
-      continue;
-    }
-
-    const expectedStatus =
-      entries[0].status === "available" ? "loaded" : "unavailable";
-    if (insight?.contextStatus !== expectedStatus) {
-      issues.push({
-        code: "constraint_mismatch",
-        message: `Participant ${participant.id} context status does not match the tool result.`,
-        participantId: participant.id,
-      });
-    }
-  }
-
-  if (issues.length > 0) {
-    throw new PlanningSafetyError(issues);
-  }
+function suppliedContextAsRaw(
+  participant: EventPlanningInput["participants"][number],
+) {
+  if (!participant.silpoContext) return undefined;
+  return {
+    silpo_get_my_food_restrictions: {
+      structuredContent: {
+        restrictions: participant.silpoContext.foodRestrictions.map((item) => ({
+          ...item,
+          type: "restriction",
+          name: item.label,
+        })),
+      },
+    },
+    silpo_get_my_favorites: {
+      structuredContent: { items: participant.silpoContext.favorites },
+    },
+  };
 }
 
 export async function planEvent(
   rawInput: unknown,
   options: PlanEventOptions = {},
 ): Promise<PlanningResult> {
-  const input = EventPlanningInputSchema.parse(rawInput);
-  const contextAccess = createParticipantContextAccess({
-    allowedParticipantIds: input.participants.map(({ id }) => id),
-    loader:
-      options.loadParticipantContext ??
-      (async () => ({
-        status: "unavailable" as const,
-        reason: "No participant context loader was provided.",
-      })),
+  const debug = createPlanningDebugEmitter(options.onDebugEvent);
+  debug.started("input", { raw: rawInput });
+  let input: EventPlanningInput;
+  try {
+    input = EventPlanningInputSchema.parse(rawInput);
+    debug.completed("input", { input });
+  } catch (error) {
+    debug.failed("input", error);
+    throw error;
+  }
+  let configuredProvider = options.modelProvider;
+  const getProvider = () => {
+    configuredProvider ??= createConfiguredPlanningProvider();
+    return configuredProvider;
+  };
+  const loadParticipantContext =
+    options.loadParticipantContext ??
+    (async () => ({
+      status: "unavailable" as const,
+      reason: "No participant context loader was provided.",
+    }));
+
+  const preprocessed = await mapWithConcurrency(
+    input.participants,
+    3,
+    async (participant) => {
+      const supplied = suppliedContextAsRaw(participant);
+      let loaded: Awaited<ReturnType<ParticipantContextLoader>>;
+      let contextFailed = false;
+      debug.started(
+        "context",
+        { source: supplied ? "supplied" : "silpo-mcp" },
+        participant.id,
+      );
+      if (supplied) {
+        loaded = { status: "available", data: supplied };
+      } else {
+        try {
+          loaded = await loadParticipantContext(participant.id);
+        } catch (error) {
+          contextFailed = true;
+          debug.failed("context", error, participant.id);
+          loaded = {
+            status: "unavailable",
+            reason: "Silpo context collection failed.",
+          };
+        }
+      }
+      if (!contextFailed) {
+        debug.completed(
+          "context",
+          loaded.status === "available"
+            ? { status: loaded.status, raw: loaded.data }
+            : loaded,
+          participant.id,
+        );
+      }
+      debug.started("signals", undefined, participant.id);
+      const signals =
+        loaded.status === "available"
+          ? extractParticipantFoodSignals(participant.id, loaded.data)
+          : ParticipantFoodSignalsSchema.parse({
+              participantId: participant.id,
+              restrictions: [],
+              favorites: [],
+              ambiguousFragments: [],
+              evidence: [],
+              completeness: "unavailable",
+            });
+      debug.completed("signals", { signals }, participant.id);
+      const normalizeAmbiguous =
+        options.normalizeParticipantContext ??
+        (signals.ambiguousFragments.length > 0
+          ? createDefaultNormalizer(getProvider())
+          : undefined);
+      let foodContext: UserFoodContext;
+      debug.started(
+        "normalization",
+        { mode: normalizeAmbiguous ? "model-assisted" : "deterministic" },
+        participant.id,
+      );
+      try {
+        foodContext = await normalizeParticipantFoodContext({
+          participant,
+          signals,
+          normalizeAmbiguous,
+        });
+        debug.completed("normalization", { foodContext }, participant.id);
+      } catch (error) {
+        debug.failed("normalization", error, participant.id);
+        const fallback = await normalizeParticipantFoodContext({
+          participant,
+          signals: {
+            ...signals,
+            ambiguousFragments: [],
+            completeness: "partial",
+          },
+        });
+        foodContext = UserFoodContextSchema.parse({
+          ...fallback,
+          completeness: "partial",
+          missingInformation: [
+            ...fallback.missingInformation,
+            "Не вдалося семантично нормалізувати частину контексту Сільпо.",
+          ].slice(0, 20),
+        });
+      }
+      const contextStatus = supplied
+        ? ("provided" as const)
+        : loaded.status === "available"
+          ? ("loaded" as const)
+          : ("unavailable" as const);
+      const trace: ParticipantContextTraceEntry =
+        loaded.status === "unavailable"
+          ? {
+              participantId: participant.id,
+              status: "unavailable",
+              reason: loaded.reason,
+            }
+          : {
+              participantId: participant.id,
+              status: "available",
+              sources: [...new Set(signals.evidence.map(({ source }) => source))],
+              restrictionCount: signals.restrictions.length,
+              favoriteCount: signals.favorites.length,
+              ambiguousFragmentCount: signals.ambiguousFragments.length,
+            };
+      return { participant, foodContext, contextStatus, trace };
+    },
+  );
+
+  debug.started("prompt");
+  const groupInput = GroupPlanningInputSchema.parse({
+    event: input.event,
+    host: input.host,
+    budget: input.budget,
+    participants: preprocessed.map(
+      ({ participant, foodContext, contextStatus }) => ({
+        id: participant.id,
+        displayName: participant.displayName,
+        foodIntent: participant.foodIntent,
+        contextStatus,
+        foodContext,
+      }),
+    ),
   });
-  const generatePlan = options.generatePlan ?? generatePlanWithGemini;
+  const system = PLANNING_SYSTEM_PROMPT;
+  const prompt = buildPlanningPrompt(groupInput);
+  debug.completed("prompt", { input: groupInput, system, prompt });
+  const generatePlan =
+    options.generatePlan ?? createDefaultPlanner(getProvider());
+  let rawPlan: unknown;
+  debug.started("model");
+  try {
+    rawPlan = await generatePlan({
+      input: groupInput,
+      system,
+      prompt,
+    });
+    debug.completed("model", { rawOutput: rawPlan });
+  } catch (error) {
+    debug.failed("model", error);
+    throw new PlanningProviderError();
+  }
+  debug.started("contract");
+  let plan: EventPlan;
+  try {
+    plan = EventPlanSchema.parse(rawPlan);
+    debug.completed("contract", { plan });
+  } catch (error) {
+    debug.failed("contract", error);
+    throw error;
+  }
+  debug.started("safety");
+  try {
+    assertEventPlanSafety(groupInput, plan);
+    debug.completed("safety", { checks: plan.hardConstraintChecks });
+  } catch (error) {
+    debug.failed("safety", error);
+    throw error;
+  }
 
-  const rawPlan = await generatePlan({
-    input,
-    contextAccess,
-    system: PLANNING_SYSTEM_PROMPT,
-    prompt: buildPlanningPrompt(input),
-  });
-  const plan = EventPlanSchema.parse(rawPlan);
-
-  assertContextCollection(input, plan, contextAccess.trace);
-  assertEventPlanSafety(input, plan);
-
-  return { plan, contextTrace: contextAccess.trace };
+  return { plan, contextTrace: preprocessed.map(({ trace }) => trace) };
 }
