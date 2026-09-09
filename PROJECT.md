@@ -1,8 +1,8 @@
 # Silpo Family
 
 Last updated: 2026-09-09
-Status: Survey-validated MVP direction confirmed; Google/Supabase auth and individual
-Silpo MCP connection foundation implemented.
+Status: No-AI multi-user party prototype implemented with Google/Supabase auth and
+real Host-cart synchronization through Silpo MCP.
 
 ## Source of truth
 
@@ -39,10 +39,10 @@ ingestion is a supported way to express food intent, not the center of the produ
 
 Our value is AI that coordinates grocery decisions across multiple independent
 people/accounts, not AI that helps one person choose groceries. The official MCP docs
-confirm personal profile and food-restriction tools. Each user connects their own Silpo
-account so the product can read their context through that user's MCP session. When
-Silpo developers integrate the product natively, the same MCP flow can pull context
-from each person's Silpo profile.
+confirm personal profile and food-restriction tools. For the current no-AI prototype,
+participants use Supabase profiles without needing Silpo; only the Host needs a Silpo
+connection for eventual final-cart synchronization. A member may connect Silpo later
+for richer context, but it is not required to join or collaborate.
 
 ## Confirmed requirements
 
@@ -55,8 +55,8 @@ from each person's Silpo profile.
   The limit applies to each event and may change in a later product revision.
 - Accounts must be real and separate; a demo identity switcher is not the product.
 - Use Supabase Auth with Google OAuth for our app accounts and Supabase for event data.
-  App authentication and Silpo authorization are separate: each signed-in member must
-  connect their own Silpo account through MCP OAuth 2.1 + PKCE.
+  App authentication and Silpo authorization are separate. Every participant needs an
+  app account; only the Host needs Silpo for eventual final cart writes.
 - The first supported scenario is an event-based group meal/party plan.
 - Each member has an individual food context: allergies, dietary restrictions,
   lifestyle/preferences, dislikes, and other relevant food preferences.
@@ -96,9 +96,9 @@ from each person's Silpo profile.
   applied. Show the proposed change and its reason; do not silently replace dishes.
 - Shared ingredients must be merged instead of purchased separately per recipe.
 - The eventual product builds one shared Silpo basket through Silpo MCP.
-- In shared event planning, the agent reads every member's context through that
-  member's own linked MCP session. Final cart write operations must use the Host's
-  linked Silpo MCP session, never another participant's session.
+- In the no-AI prototype, each participant explicitly submits intent and can use
+  Supabase profile/preferences without Silpo. Optional member MCP connections may later
+  enrich context. Final cart writes must use the Host's linked Silpo MCP session.
 - Members can directly edit the shared basket, not only submit suggestions.
 - Members are active participants, not passive request submitters. The Host acts as
   administrator and has final authority over important AI-proposed changes;
@@ -137,6 +137,9 @@ global reasoning, not a set of independently finalized shopping lists.
   product's primary value proposition.
 - Ownership review and bill splitting are secondary/demo scope and should be
   implemented only after the core group-planning and shared-basket flow is solid.
+- The no-AI prototype includes manual product entry, equal allocation of each item
+  among selected participants, exact-cent totals owed to the Host, and Host
+  finalization so the collaboration loop can be validated before AI work.
 - Party/group meal planning is the first event-based demonstration scenario.
 - Required integration capabilities still need verification; a demo scenario does
   not authorize replacing core account, event, planning or basket flows with simulations.
@@ -167,6 +170,8 @@ global reasoning, not a set of independently finalized shopping lists.
 
 - `src/app/page.tsx` provides Google login and an authenticated profile entry point.
 - `src/app/profile/page.tsx` is the protected individual profile and Silpo connection surface.
+- `src/app/parties/page.tsx`, `src/app/join/[code]/page.tsx` and
+  `src/app/party/[code]/page.tsx` implement party creation, joining and the no-AI workspace.
 - `src/app/globals.css` contains the initial mobile-first auth/profile styling.
 - `next.config.ts` enables the React compiler.
 - `package.json`: Next.js 16.3.4, React 19.2.8, Tailwind CSS 4, TypeScript;
@@ -201,10 +206,37 @@ global reasoning, not a set of independently finalized shopping lists.
 - MCP calls execute only in server-only modules. The client receives connection state
   and safe availability summaries, never Silpo access/refresh tokens. Expiring access
   tokens are refreshed server-side when a refresh token is available.
-- Each Supabase user has at most one linked Silpo connection. Shared-event reads select
-  the MCP session by participant user ID; final cart mutations select the Host user ID.
+- Each Supabase user has at most one optional linked Silpo connection. Event
+  participation requires only Supabase auth. Optional member MCP enrichment selects
+  that member's connection; final cart mutations select the Host user ID.
 - The required schema is in `supabase/migrations/202609080001_auth_profiles_silpo_oauth.sql`;
   required environment variables are documented in `.env.example`.
+
+## No-AI party prototype architecture — implemented
+
+- The Host creates an event and receives an eight-character code plus a shareable
+  `/join/{code}` URL. The link survives Google login through the `next` callback
+  parameter; manual code entry is a fallback.
+- Membership is event-scoped and limited to 10 people. PostgreSQL creates Host
+  membership transactionally and locks the event during joins so concurrent requests
+  cannot exceed the limit.
+- Every participant can submit a dish, free-text intent, recipe/content URL or explicit
+  “I don't care” response.
+- The Host sets the shared budget. Every member can add, edit and remove manual basket
+  items while the event is open.
+- Each item has one or more selected participants and is split equally among them.
+  Remainder cents are distributed deterministically, so participant totals exactly
+  match the whole party bill.
+- The Host can finalize without unanimous approval after setting a budget. Finalization
+  freezes edits; the Host can reopen the party.
+- RLS plus server authorization protects party data. Security-definer functions handle
+  creation, capacity-safe joining and atomic share replacement.
+- Apply `supabase/migrations/202609090001_party_prototype.sql` and then
+  `supabase/migrations/202609090002_silpo_cart_sync.sql` after the auth migration.
+- Product lookup, quantity changes and removals synchronize with the Host's active
+  Silpo basket through the Host's server-only MCP session. Failed synchronization is
+  retained visibly and can be retried by the Host. This stage deliberately does not
+  run AI.
 
 ## Confirmed MVP user experience
 
@@ -248,8 +280,8 @@ Optional after the core flow is solid: Mine / Not mine → split bill.
 This sequence and the primacy of the shared plan/basket workspace are confirmed product direction.
 Detailed screen layouts, readiness mechanics, ownership-conflict handling and split
 formulas have not been specified. The MVP delivery menu/checkout presentation is a
-mocked animation; a real Silpo execution/checkout handoff is deferred and would depend
-on verified integration capabilities and a chosen purchase endpoint.
+mocked animation. Real Silpo catalog/cart execution and checkout-link handoff are now
+implemented through MCP; placing the order, payment and delivery tracking remain deferred.
 
 ## Design proposals — not approved
 
@@ -276,9 +308,9 @@ Concepts, not committed database tables or APIs:
   agent conversation and proposals. Secondary concepts include item-to-participant
   attribution with multiple owners, ambiguous-item review responses and amounts owed.
 
-Candidate implementation states reflecting the confirmed UX: collecting intents
-→ awaiting Host budget/start → generating → shared plan/basket review and editing
-→ Host finalization. Optional secondary states: ownership review → bill split.
+Current no-AI states: collecting intents/basket and awaiting Host budget → collaborative
+review/editing and allocation → Host finalization. The later AI state adds generation
+between collection and review.
 Exact state transitions and exceptional paths remain design work; these labels do
 not add participant approval gates or change the confirmed UX sequence.
 Support empty, pending, failed/retry, and stale-result states for real usage.
@@ -357,9 +389,10 @@ Do not interpret this checkpoint as approval of unspecified major decisions.
 - Full Silpo navigation, catalog browsing, loyalty, real delivery management, checkout
   and payment UI. The MVP delivery menu is only a mocked animation.
 - Supabase is selected for own accounts, event data and product-specific answers not
-  available through MCP. Google auth, the initial profile schema, token-storage schema
-  and MCP connection flow are implemented. Event schema, realtime transport, AI
-  orchestration, recipe ingestion and remaining persistence design await implementation.
+  available through MCP. Google auth, profile/token storage, MCP connection, event
+  membership, intent, budget, collaborative basket, Host MCP cart synchronization,
+  allocation and finalization are implemented. Realtime, AI orchestration, automated
+  recipe ingestion and remaining persistence design await implementation.
 
 ## Decision log
 
@@ -423,26 +456,25 @@ confirmed sections prevail over superseded interpretations.
   browser receives no Silpo tokens. The server fetches available personal profile,
   restriction and favorites context through each member's own MCP session. Shared-event
   architecture reserves final cart writes for the Host's MCP session.
-- 2026-09-09: Implemented the approved participant-isolated AI preprocessing
-  architecture. Raw
-  Silpo MCP responses must be deterministically filtered and, only when semantic
-  interpretation is needed, normalized separately per participant into a strict,
-  compact `UserFoodContext`. The group planner receives only those contexts, food
-  intents, event data and budget. Direct Alibaba Cloud Model Studio through the
-  international DashScope endpoint with `qwen3.8-flash` is the primary provider,
-  isolated behind an injectable interface. Full histories, orders, promotions,
-  catalogs, product details, contact
-  data and unrelated MCP output must not enter the group-planning prompt. Supabase
-  changes are permitted when technically necessary, but request-scoped normalization
-  does not currently require persistence.
+- 2026-09-09: Implemented the no-AI party prototype: transactional event creation and
+  invitation/code joining, server-enforced 10-person membership, food intents, Host
+  budget, collaborative manual basket edits, multi-owner allocation, exact-cent
+  per-person amounts, and Host finalization/reopening. Participants need only Supabase
+  accounts; Silpo is optional for members. This established the local collaboration
+  layer before real-cart synchronization was added in the next implementation step.
+- 2026-09-09: Added real Silpo basket synchronization. Collaborative product additions,
+  quantity changes and removals resolve through the official MCP catalog/cart tools and
+  mutate only the Host's active Silpo cart. MCP failures are stored for retry; tokens
+  remain encrypted and server-only. Friends still need app accounts, while their own
+  Silpo connections remain optional.
 
 ## Contradictions resolved and ambiguity retained
 
 - Persistent Family membership was an incorrect restoration. The MVP has event-only
   membership; persistent household/Family groups are deferred.
-- Supabase-only food context was an overly narrow interpretation. Supabase accounts
-  remain confirmed, but relevant food context comes from Silpo MCP. Future integration
-  can retrieve it from each person's Silpo profile through MCP.
+- Supabase accounts and fallback profiles are sufficient for participation. Silpo MCP
+  can enrich an optionally connected member's context; only the Host connection is
+  required for current real-cart writes.
 - The fixed 10-person limit is preserved and applies to each event.
 - Core product flows should be functional, but the delivery menu is deliberately a
   mocked animation. Real delivery/checkout integration is deferred.

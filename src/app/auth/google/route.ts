@@ -2,11 +2,16 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 
 export async function GET(request: Request) {
-  const origin = process.env.NEXT_PUBLIC_APP_URL?.replace(/\/$/, "") ?? new URL(request.url).origin;
+  const requestUrl = new URL(request.url);
+  const origin = process.env.NEXT_PUBLIC_APP_URL?.replace(/\/$/, "") ?? requestUrl.origin;
+  const requestedNext = requestUrl.searchParams.get("next") ?? "/profile";
+  const next = requestedNext.startsWith("/") && !requestedNext.startsWith("//")
+    ? requestedNext
+    : "/profile";
   const supabase = await createClient();
   const { data, error } = await supabase.auth.signInWithOAuth({
     provider: "google",
-    options: { redirectTo: `${origin}/auth/callback?next=/profile` },
+    options: { redirectTo: `${origin}/auth/callback?next=${encodeURIComponent(next)}` },
   });
   if (error || !data.url) {
     return NextResponse.redirect(`${origin}/?auth=google_error`);

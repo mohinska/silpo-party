@@ -1,0 +1,366 @@
+import "server-only";
+
+import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { createAdminClient } from "@/lib/supabase/admin";
+import { readToolData, type SilpoTool, withSilpoMcp } from "@/lib/silpo/mcp";
+
+type JsonSchema = {
+  type?: string;
+  properties?: Record<string, JsonSchema>;
+  items?: JsonSchema;
+  required?: string[];
+  enum?: unknown[];
+};
+
+type CartContext = {
+  cartId: string;
+  branchId?: string;
+  companyId?: string;
+  deliveryType?: string;
+  checkoutUrl?: string;
+};
+
+type ManagedItem = {
+  id: string;
+  name: string;
+  quantity: number | string;
+  unit_price_cents: number;
+  silpo_product_id: string | null;
+  silpo_company_id: string | null;
+  silpo_branch_id: string | null;
+};
+
+type ResolvedProduct = {
+  productId: string;
+  companyId?: string;
+  branchId?: string;
+  name: string;
+  priceCents?: number;
+  slug?: string;
+  imageUrl?: string;
+};
+
+type ToolMode = "cart" | "timeslots" | "find" | "add" | "remove";
+
+function normalized(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function objectValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function deepValue(value: unknown, names: string[]): unknown {
+  const wanted = new Set(names.map(normalized));
+  const queue: unknown[] = [value];
+  while (queue.length) {
+    const current = queue.shift();
+    if (Array.isArray(current)) {
+      queue.push(...current);
+      continue;
+    }
+    const record = objectValue(current);
+    if (!record) continue;
+    for (const [key, nested] of Object.entries(record)) {
+      if (wanted.has(normalized(key)) && nested !== null && nested !== undefined) return nested;
+      if (typeof nested === "object" && nested !== null) queue.push(nested);
+    }
+  }
+  return undefined;
+}
+
+function stringValue(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function numberValue(value: unknown) {
+  const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function buildNestedObject(
+  schema: JsonSchema | undefined,
+  values: { query?: string; quantity?: number; product?: ResolvedProduct },
+) {
+  const properties = schema?.properties ?? {};
+  const result: Record<string, unknown> = {};
+  for (const [key] of Object.entries(properties)) {
+    const name = normalized(key);
+    if (["query", "search", "searchtext", "searchterm", "text", "name", "productname"].includes(name) && values.query) result[key] = values.query;
+    else if (["quantity", "count", "amount"].includes(name) && values.quantity !== undefined) result[key] = values.quantity;
+    else if (["productid", "id"].includes(name) && values.product) result[key] = values.product.productId;
+    else if (name === "companyid" && values.product?.companyId) result[key] = values.product.companyId;
+    else if (name === "branchid" && values.product?.branchId) result[key] = values.product.branchId;
+  }
+  return result;
+}
+
+function buildArguments(
+  tool: SilpoTool,
+  mode: ToolMode,
+  context: Partial<CartContext>,
+  options: { queries?: Array<{ name: string; quantity: number }>; products?: Array<ResolvedProduct & { quantity: number }> } = {},
+) {
+  const schema = (tool.inputSchema ?? {}) as JsonSchema;
+  const properties = schema.properties ?? {};
+  const result: Record<string, unknown> = {};
+  for (const [key, property] of Object.entries(properties)) {
+    const name = normalized(key);
+    if (["shoppingcartid", "cartid"].includes(name) || (name === "id" && mode === "cart")) result[key] = context.cartId;
+    else if (name === "branchid" && context.branchId) result[key] = context.branchId;
+    else if (name === "companyid" && context.companyId) result[key] = context.companyId;
+    else if (name === "deliverytype" && context.deliveryType) result[key] = context.deliveryType;
+    else if (["items", "queries", "searches"].includes(name) && mode === "find") {
+      const queries = options.queries ?? [];
+      result[key] = property.items?.type === "string"
+        ? queries.map((entry) => entry.name)
+        : queries.map((entry) => buildNestedObject(property.items, { query: entry.name, quantity: entry.quantity }));
+    } else if (["products", "items", "cartproducts"].includes(name) && ["add", "remove"].includes(mode)) {
+      const products = options.products ?? [];
+      result[key] = property.items?.type === "string"
+        ? products.map((entry) => entry.productId)
+        : products.map((entry) => buildNestedObject(property.items, { product: entry, quantity: entry.quantity }));
+    } else if (["productids", "ids"].includes(name) && mode === "remove") {
+      result[key] = (options.products ?? []).map((entry) => entry.productId);
+    } else if (name === "productid" && options.products?.[0]) result[key] = options.products[0].productId;
+    else if (["quantity", "count", "amount"].includes(name) && options.products?.[0]) result[key] = options.products[0].quantity;
+  }
+
+  const missing = (schema.required ?? []).filter((key) => result[key] === undefined);
+  if (missing.length) {
+    throw new Error(`Silpo tool ${tool.name} requires unsupported fields: ${missing.join(", ")}.`);
+  }
+  return result;
+}
+
+async function callTool(
+  client: Client,
+  tools: Map<string, SilpoTool>,
+  name: string,
+  mode: ToolMode,
+  context: Partial<CartContext> = {},
+  options?: { queries?: Array<{ name: string; quantity: number }>; products?: Array<ResolvedProduct & { quantity: number }> },
+) {
+  const tool = tools.get(name);
+  if (!tool) throw new Error(`Silpo MCP tool ${name} is unavailable.`);
+  const result = await client.callTool({ name, arguments: buildArguments(tool, mode, context, options) });
+  if ((result as { isError?: boolean }).isError) {
+    throw new Error(`Silpo MCP ${name}: ${JSON.stringify(readToolData(result))}`);
+  }
+  return readToolData(result);
+}
+
+async function getCartContext(client: Client, tools: Map<string, SilpoTool>): Promise<CartContext> {
+  const active = await callTool(client, tools, "silpo_get_my_shopping_cart", "cart");
+  const cartId = stringValue(deepValue(active, ["shoppingCartId", "cartId"]));
+  if (!cartId) {
+    throw new Error("У Host немає активного кошика «Сільпо». Створіть кошик і виберіть доставку в застосунку або на silpo.ua.");
+  }
+  const details = await callTool(client, tools, "silpo_get_shopping_cart_by_id", "cart", { cartId });
+  const context: CartContext = {
+    cartId,
+    branchId: stringValue(deepValue(details, ["branchId"])),
+    companyId: stringValue(deepValue(details, ["companyId"])),
+    deliveryType: stringValue(deepValue(details, ["deliveryType"])),
+    checkoutUrl: stringValue(deepValue(details, ["checkoutWebLink", "checkoutUrl", "checkoutMobileLink"])),
+  };
+  if (!context.branchId) throw new Error("У кошику Host не вибрано магазин або спосіб доставки.");
+  if (tools.has("silpo_get_time_slots") && context.deliveryType) {
+    await callTool(client, tools, "silpo_get_time_slots", "timeslots", context);
+  }
+  return context;
+}
+
+function productCandidates(value: unknown, context: CartContext): ResolvedProduct[] {
+  const candidates: ResolvedProduct[] = [];
+  const queue: unknown[] = [value];
+  while (queue.length) {
+    const current = queue.shift();
+    if (Array.isArray(current)) {
+      queue.push(...current);
+      continue;
+    }
+    const record = objectValue(current);
+    if (!record) continue;
+    const productId = stringValue(deepValue(record, ["productId"]));
+    const title = stringValue(deepValue(record, ["name", "title", "productName"]));
+    if (productId && title) {
+      const rawPrice = numberValue(deepValue(record, ["currentPrice", "salePrice", "price", "priceValue"]));
+      candidates.push({
+        productId,
+        companyId: stringValue(deepValue(record, ["companyId"])) ?? context.companyId,
+        branchId: stringValue(deepValue(record, ["branchId"])) ?? context.branchId,
+        name: title,
+        priceCents: rawPrice === undefined ? undefined : Math.round(rawPrice > 10_000 ? rawPrice : rawPrice * 100),
+        slug: stringValue(deepValue(record, ["slug"])),
+        imageUrl: stringValue(deepValue(record, ["imageUrl", "image", "photoUrl"])),
+      });
+    }
+    queue.push(...Object.values(record).filter((nested) => typeof nested === "object" && nested !== null));
+  }
+  return [...new Map(candidates.map((candidate) => [candidate.productId, candidate])).values()];
+}
+
+function cartUnitPrice(cart: unknown, productId: string, quantity: number) {
+  const queue: unknown[] = [cart];
+  while (queue.length) {
+    const current = queue.shift();
+    if (Array.isArray(current)) {
+      queue.push(...current);
+      continue;
+    }
+    const record = objectValue(current);
+    if (!record) continue;
+    const directProductId = Object.entries(record).find(([key]) => normalized(key) === "productid")?.[1];
+    if (String(directProductId ?? "") === productId) {
+      const unit = numberValue(deepValue(record, ["unitPrice", "currentPrice", "salePrice", "priceValue"]));
+      if (unit !== undefined) return Math.round(unit > 10_000 ? unit : unit * 100);
+      const total = numberValue(deepValue(record, ["totalPrice", "lineTotal", "sum"]));
+      if (total !== undefined && quantity > 0) {
+        const unitTotal = total / quantity;
+        return Math.round(unitTotal > 10_000 ? unitTotal : unitTotal * 100);
+      }
+    }
+    queue.push(...Object.values(record).filter((nested) => typeof nested === "object" && nested !== null));
+  }
+  return undefined;
+}
+
+function similarity(query: string, candidate: string) {
+  const words = query.toLocaleLowerCase("uk-UA").match(/[\p{L}\p{N}]+/gu) ?? [query.toLocaleLowerCase("uk-UA")];
+  const target = candidate.toLocaleLowerCase("uk-UA");
+  return words.reduce((score, word) => score + (target.includes(word) ? word.length : 0), 0);
+}
+
+async function resolveProducts(client: Client, tools: Map<string, SilpoTool>, context: CartContext, items: ManagedItem[]) {
+  if (!items.length) return new Map<string, ResolvedProduct>();
+  const data = await callTool(client, tools, "silpo_find_products_batch", "find", context, {
+    queries: items.map((item) => ({ name: item.name, quantity: Number(item.quantity) })),
+  });
+  const candidates = productCandidates(data, context);
+  return new Map(items.map((item) => {
+    const product = [...candidates].sort((left, right) => similarity(item.name, right.name) - similarity(item.name, left.name))[0];
+    if (!product || similarity(item.name, product.name) === 0) throw new Error(`«Сільпо» не знайшло товар за запитом «${item.name}».`);
+    if (!product.companyId) throw new Error(`Для товару «${product.name}» MCP не повернув companyId.`);
+    return [item.id, product];
+  }));
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message.slice(0, 1000) : "Невідома помилка синхронізації «Сільпо».";
+}
+
+export async function syncPartyBasketToSilpo(partyId: string, hostId: string) {
+  const admin = createAdminClient();
+  await admin.from("parties").update({ silpo_sync_status: "pending", silpo_sync_error: null }).eq("id", partyId);
+  const { data, error } = await admin
+    .from("basket_items")
+    .select("id, name, quantity, unit_price_cents, silpo_product_id, silpo_company_id, silpo_branch_id")
+    .eq("party_id", partyId)
+    .order("created_at");
+  if (error) throw error;
+  const items = (data ?? []) as ManagedItem[];
+
+  try {
+    const result = await withSilpoMcp(hostId, async (client, tools) => {
+      const context = await getCartContext(client, tools);
+      const newlyResolved = await resolveProducts(client, tools, context, items.filter((item) => !item.silpo_product_id));
+      const resolved = items.map((item) => {
+        if (item.silpo_product_id) {
+          return {
+            ...item,
+            product: {
+              productId: item.silpo_product_id,
+              companyId: item.silpo_company_id ?? context.companyId,
+              branchId: item.silpo_branch_id ?? context.branchId,
+              name: item.name,
+            } satisfies ResolvedProduct,
+          };
+        }
+        const product = newlyResolved.get(item.id);
+        if (!product) throw new Error(`Не вдалося зіставити «${item.name}» з каталогом «Сільпо».`);
+        return { ...item, product };
+      });
+
+      const grouped = new Map<string, ResolvedProduct & { quantity: number }>();
+      for (const item of resolved) {
+        const key = `${item.product.productId}:${item.product.companyId ?? ""}:${item.product.branchId ?? ""}`;
+        const existing = grouped.get(key);
+        grouped.set(key, { ...item.product, quantity: (existing?.quantity ?? 0) + Number(item.quantity) });
+      }
+      if (grouped.size) {
+        await callTool(client, tools, "silpo_add_or_update_cart_products", "add", context, { products: [...grouped.values()] });
+      }
+      const cart = await callTool(client, tools, "silpo_get_shopping_cart_by_id", "cart", context);
+      const checkoutUrl = stringValue(deepValue(cart, ["checkoutWebLink", "checkoutUrl", "checkoutMobileLink"])) ?? context.checkoutUrl;
+      const withCartPrices = resolved.map((item) => ({
+        ...item,
+        product: {
+          ...item.product,
+          priceCents: cartUnitPrice(cart, item.product.productId, Number(item.quantity)) ?? item.product.priceCents,
+        },
+      }));
+      return { context, resolved: withCartPrices, checkoutUrl };
+    });
+
+    await Promise.all(result.resolved.map((item) => admin.from("basket_items").update({
+      name: item.product.name,
+      unit_price_cents: item.product.priceCents ?? item.unit_price_cents,
+      silpo_product_id: item.product.productId,
+      silpo_company_id: item.product.companyId ?? null,
+      silpo_branch_id: item.product.branchId ?? result.context.branchId ?? null,
+      silpo_product_slug: item.product.slug ?? null,
+      silpo_image_url: item.product.imageUrl ?? null,
+      silpo_sync_status: "synced",
+      silpo_sync_error: null,
+      updated_at: new Date().toISOString(),
+    }).eq("id", item.id)));
+    await admin.from("parties").update({
+      silpo_cart_id: result.context.cartId,
+      silpo_checkout_url: result.checkoutUrl ?? null,
+      silpo_sync_status: "synced",
+      silpo_sync_error: null,
+      silpo_synced_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    }).eq("id", partyId);
+    return { ok: true as const };
+  } catch (error) {
+    const message = errorMessage(error);
+    await Promise.all([
+      admin.from("parties").update({ silpo_sync_status: "error", silpo_sync_error: message }).eq("id", partyId),
+      admin.from("basket_items").update({ silpo_sync_status: "error", silpo_sync_error: message }).eq("party_id", partyId),
+    ]);
+    return { ok: false as const, error: message };
+  }
+}
+
+export async function removePartyItemFromSilpo(partyId: string, hostId: string, item: ManagedItem) {
+  if (!item.silpo_product_id) return { ok: true as const };
+  try {
+    await withSilpoMcp(hostId, async (client, tools) => {
+      const context = await getCartContext(client, tools);
+      const admin = createAdminClient();
+      const { data } = await admin
+        .from("basket_items")
+        .select("quantity")
+        .eq("party_id", partyId)
+        .eq("silpo_product_id", item.silpo_product_id)
+        .neq("id", item.id);
+      const remaining = (data ?? []).reduce((sum, entry) => sum + Number(entry.quantity), 0);
+      const product = {
+        productId: item.silpo_product_id!,
+        companyId: item.silpo_company_id ?? context.companyId,
+        branchId: item.silpo_branch_id ?? context.branchId,
+        name: item.name,
+        quantity: remaining,
+      };
+      if (remaining > 0) await callTool(client, tools, "silpo_add_or_update_cart_products", "add", context, { products: [product] });
+      else await callTool(client, tools, "silpo_remove_cart_products", "remove", context, { products: [{ ...product, quantity: Number(item.quantity) }] });
+    });
+    return { ok: true as const };
+  } catch (error) {
+    return { ok: false as const, error: errorMessage(error) };
+  }
+}
