@@ -17,6 +17,8 @@ type CartContext = {
   branchId?: string;
   companyId?: string;
   deliveryType?: string;
+  timeslotStart?: string;
+  timeslotEnd?: string;
   checkoutUrl?: string;
 };
 
@@ -24,6 +26,7 @@ type ManagedItem = {
   id: string;
   name: string;
   quantity: number | string;
+  unit: string;
   unit_price_cents: number;
   silpo_product_id: string | null;
   silpo_company_id: string | null;
@@ -38,6 +41,7 @@ type ResolvedProduct = {
   priceCents?: number;
   slug?: string;
   imageUrl?: string;
+  displayRatio?: string;
 };
 
 type ToolMode = "cart" | "timeslots" | "find" | "add" | "remove";
@@ -50,6 +54,11 @@ function objectValue(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
+}
+
+function directValue(record: Record<string, unknown>, names: string[]) {
+  const wanted = new Set(names.map(normalized));
+  return Object.entries(record).find(([key, value]) => wanted.has(normalized(key)) && value !== null && value !== undefined)?.[1];
 }
 
 function deepValue(value: unknown, names: string[]): unknown {
@@ -112,7 +121,9 @@ function buildArguments(
     else if (name === "branchid" && context.branchId) result[key] = context.branchId;
     else if (name === "companyid" && context.companyId) result[key] = context.companyId;
     else if (name === "deliverytype" && context.deliveryType) result[key] = context.deliveryType;
-    else if (["items", "queries", "searches"].includes(name) && mode === "find") {
+    else if (name === "timeslotstart" && context.timeslotStart) result[key] = context.timeslotStart;
+    else if (name === "timeslotend" && context.timeslotEnd) result[key] = context.timeslotEnd;
+    else if (["items", "queries", "searches", "products"].includes(name) && mode === "find") {
       const queries = options.queries ?? [];
       result[key] = property.items?.type === "string"
         ? queries.map((entry) => entry.name)
@@ -159,11 +170,14 @@ async function getCartContext(client: Client, tools: Map<string, SilpoTool>): Pr
     throw new Error("У Host немає активного кошика «Сільпо». Створіть кошик і виберіть доставку в застосунку або на silpo.ua.");
   }
   const details = await callTool(client, tools, "silpo_get_shopping_cart_by_id", "cart", { cartId });
+  const timeslot = deepValue(details, ["timeslot"]);
   const context: CartContext = {
     cartId,
     branchId: stringValue(deepValue(details, ["branchId"])),
     companyId: stringValue(deepValue(details, ["companyId"])),
     deliveryType: stringValue(deepValue(details, ["deliveryType"])),
+    timeslotStart: stringValue(deepValue(details, ["timeslotStart"])) ?? stringValue(deepValue(timeslot, ["start"])),
+    timeslotEnd: stringValue(deepValue(details, ["timeslotEnd"])) ?? stringValue(deepValue(timeslot, ["end"])),
     checkoutUrl: stringValue(deepValue(details, ["checkoutWebLink", "checkoutUrl", "checkoutMobileLink"])),
   };
   if (!context.branchId) throw new Error("У кошику Host не вибрано магазин або спосіб доставки.");
@@ -184,23 +198,46 @@ function productCandidates(value: unknown, context: CartContext): ResolvedProduc
     }
     const record = objectValue(current);
     if (!record) continue;
-    const productId = stringValue(deepValue(record, ["productId"]));
-    const title = stringValue(deepValue(record, ["name", "title", "productName"]));
+    // Product search results currently use `id`; cart payloads may use `productId`.
+    // Read these fields only from the product object itself so a wrapper ID is not
+    // accidentally paired with a nested product name.
+    const productId = stringValue(directValue(record, ["productId", "id"]));
+    const title = stringValue(directValue(record, ["name", "title", "productName"]));
     if (productId && title) {
-      const rawPrice = numberValue(deepValue(record, ["currentPrice", "salePrice", "price", "priceValue"]));
+      const rawPrice = numberValue(directValue(record, ["currentPrice", "salePrice", "price", "priceValue"]));
       candidates.push({
         productId,
-        companyId: stringValue(deepValue(record, ["companyId"])) ?? context.companyId,
-        branchId: stringValue(deepValue(record, ["branchId"])) ?? context.branchId,
+        companyId: stringValue(directValue(record, ["companyId"])) ?? context.companyId,
+        branchId: stringValue(directValue(record, ["branchId"])) ?? context.branchId,
         name: title,
         priceCents: rawPrice === undefined ? undefined : Math.round(rawPrice > 10_000 ? rawPrice : rawPrice * 100),
-        slug: stringValue(deepValue(record, ["slug"])),
-        imageUrl: stringValue(deepValue(record, ["imageUrl", "image", "photoUrl"])),
+        slug: stringValue(directValue(record, ["slug"])),
+        imageUrl: stringValue(directValue(record, ["imageUrl", "image", "photoUrl"])),
+        displayRatio: stringValue(directValue(record, ["displayRatio", "unit"])),
       });
     }
     queue.push(...Object.values(record).filter((nested) => typeof nested === "object" && nested !== null));
   }
   return [...new Map(candidates.map((candidate) => [candidate.productId, candidate])).values()];
+}
+
+function catalogQuery(name: string) {
+  return name.replace(/кока[\s-]*кола/giu, "Coca-Cola");
+}
+
+function searchKey(value: string) {
+  return value.toLocaleLowerCase("uk-UA").match(/[\p{L}\p{N}]+/gu)?.join("") ?? value.toLocaleLowerCase("uk-UA");
+}
+
+function queryGroups(value: unknown, context: CartContext) {
+  const record = objectValue(value);
+  const groups = record ? directValue(record, ["queries"]) : undefined;
+  if (!Array.isArray(groups)) return new Map<string, ResolvedProduct[]>();
+  return new Map(groups.flatMap((entry): Array<[string, ResolvedProduct[]]> => {
+    const group = objectValue(entry);
+    const query = group && stringValue(directValue(group, ["query", "search", "searchText"]));
+    return query ? [[searchKey(query), productCandidates(directValue(group, ["products", "items", "results"]), context)]] : [];
+  }));
 }
 
 function cartUnitPrice(cart: unknown, productId: string, quantity: number) {
@@ -235,17 +272,28 @@ function similarity(query: string, candidate: string) {
 }
 
 async function resolveProducts(client: Client, tools: Map<string, SilpoTool>, context: CartContext, items: ManagedItem[]) {
-  if (!items.length) return new Map<string, ResolvedProduct>();
+  const products = new Map<string, ResolvedProduct>();
+  const errors = new Map<string, string>();
+  if (!items.length) return { products, errors };
+  const queries = items.map((item) => ({ name: catalogQuery(item.name), quantity: Number(item.quantity) }));
   const data = await callTool(client, tools, "silpo_find_products_batch", "find", context, {
-    queries: items.map((item) => ({ name: item.name, quantity: Number(item.quantity) })),
+    queries,
   });
-  const candidates = productCandidates(data, context);
-  return new Map(items.map((item) => {
-    const product = [...candidates].sort((left, right) => similarity(item.name, right.name) - similarity(item.name, left.name))[0];
-    if (!product || similarity(item.name, product.name) === 0) throw new Error(`«Сільпо» не знайшло товар за запитом «${item.name}».`);
-    if (!product.companyId) throw new Error(`Для товару «${product.name}» MCP не повернув companyId.`);
-    return [item.id, product];
-  }));
+  const grouped = queryGroups(data, context);
+  const allCandidates = productCandidates(data, context);
+  items.forEach((item, index) => {
+    const query = queries[index].name;
+    const candidates = grouped.get(searchKey(query)) ?? allCandidates;
+    const product = [...candidates].sort((left, right) => similarity(query, right.name) - similarity(query, left.name))[0];
+    if (!product || similarity(query, product.name) === 0) {
+      errors.set(item.id, `«Сільпо» не знайшло товар за запитом «${item.name}». Спробуйте точнішу назву з каталогу.`);
+    } else if (!product.companyId) {
+      errors.set(item.id, `Для товару «${product.name}» MCP не повернув companyId.`);
+    } else {
+      products.set(item.id, product);
+    }
+  });
+  return { products, errors };
 }
 
 function errorMessage(error: unknown) {
@@ -257,7 +305,7 @@ export async function syncPartyBasketToSilpo(partyId: string, hostId: string) {
   await admin.from("parties").update({ silpo_sync_status: "pending", silpo_sync_error: null }).eq("id", partyId);
   const { data, error } = await admin
     .from("basket_items")
-    .select("id, name, quantity, unit_price_cents, silpo_product_id, silpo_company_id, silpo_branch_id")
+    .select("id, name, quantity, unit, unit_price_cents, silpo_product_id, silpo_company_id, silpo_branch_id")
     .eq("party_id", partyId)
     .order("created_at");
   if (error) throw error;
@@ -266,10 +314,10 @@ export async function syncPartyBasketToSilpo(partyId: string, hostId: string) {
   try {
     const result = await withSilpoMcp(hostId, async (client, tools) => {
       const context = await getCartContext(client, tools);
-      const newlyResolved = await resolveProducts(client, tools, context, items.filter((item) => !item.silpo_product_id));
-      const resolved = items.map((item) => {
+      const resolution = await resolveProducts(client, tools, context, items.filter((item) => !item.silpo_product_id));
+      const resolved = items.flatMap((item) => {
         if (item.silpo_product_id) {
-          return {
+          return [{
             ...item,
             product: {
               productId: item.silpo_product_id,
@@ -277,11 +325,10 @@ export async function syncPartyBasketToSilpo(partyId: string, hostId: string) {
               branchId: item.silpo_branch_id ?? context.branchId,
               name: item.name,
             } satisfies ResolvedProduct,
-          };
+          }];
         }
-        const product = newlyResolved.get(item.id);
-        if (!product) throw new Error(`Не вдалося зіставити «${item.name}» з каталогом «Сільпо».`);
-        return { ...item, product };
+        const product = resolution.products.get(item.id);
+        return product ? [{ ...item, product }] : [];
       });
 
       const grouped = new Map<string, ResolvedProduct & { quantity: number }>();
@@ -302,11 +349,13 @@ export async function syncPartyBasketToSilpo(partyId: string, hostId: string) {
           priceCents: cartUnitPrice(cart, item.product.productId, Number(item.quantity)) ?? item.product.priceCents,
         },
       }));
-      return { context, resolved: withCartPrices, checkoutUrl };
+      return { context, resolved: withCartPrices, checkoutUrl, errors: resolution.errors };
     });
 
-    await Promise.all(result.resolved.map((item) => admin.from("basket_items").update({
+    await Promise.all([
+      ...result.resolved.map((item) => admin.from("basket_items").update({
       name: item.product.name,
+      unit: item.product.displayRatio ?? item.unit,
       unit_price_cents: item.product.priceCents ?? item.unit_price_cents,
       silpo_product_id: item.product.productId,
       silpo_company_id: item.product.companyId ?? null,
@@ -316,16 +365,25 @@ export async function syncPartyBasketToSilpo(partyId: string, hostId: string) {
       silpo_sync_status: "synced",
       silpo_sync_error: null,
       updated_at: new Date().toISOString(),
-    }).eq("id", item.id)));
+      }).eq("id", item.id)),
+      ...[...result.errors].map(([id, message]) => admin.from("basket_items").update({
+        silpo_sync_status: "error",
+        silpo_sync_error: message,
+        updated_at: new Date().toISOString(),
+      }).eq("id", id)),
+    ]);
+    const failedMessage = result.errors.size ? [...result.errors.values()].join(" ").slice(0, 1000) : null;
     await admin.from("parties").update({
       silpo_cart_id: result.context.cartId,
       silpo_checkout_url: result.checkoutUrl ?? null,
-      silpo_sync_status: "synced",
-      silpo_sync_error: null,
+      silpo_sync_status: result.errors.size ? "error" : "synced",
+      silpo_sync_error: failedMessage,
       silpo_synced_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     }).eq("id", partyId);
-    return { ok: true as const };
+    return result.errors.size
+      ? { ok: false as const, error: failedMessage ?? "Не всі товари знайдено." }
+      : { ok: true as const };
   } catch (error) {
     const message = errorMessage(error);
     await Promise.all([
