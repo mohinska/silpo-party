@@ -4,6 +4,10 @@ import type {
   ParticipantContextLoader,
   ParticipantContextTraceEntry,
 } from "./context";
+import {
+  createPlanningDebugEmitter,
+  type PlanningDebugEventSink,
+} from "./debug-stream";
 import { PlanningProviderError } from "./errors";
 import {
   extractParticipantFoodSignals,
@@ -39,6 +43,7 @@ export type PlanEventOptions = {
   normalizeParticipantContext?: ParticipantNormalizationAdapter;
   generatePlan?: PlanGenerationAdapter;
   modelProvider?: PlanningModelProvider;
+  onDebugEvent?: PlanningDebugEventSink;
 };
 
 export type PlanningResult = {
@@ -119,7 +124,16 @@ export async function planEvent(
   rawInput: unknown,
   options: PlanEventOptions = {},
 ): Promise<PlanningResult> {
-  const input = EventPlanningInputSchema.parse(rawInput);
+  const debug = createPlanningDebugEmitter(options.onDebugEvent);
+  debug.started("input", { raw: rawInput });
+  let input: EventPlanningInput;
+  try {
+    input = EventPlanningInputSchema.parse(rawInput);
+    debug.completed("input", { input });
+  } catch (error) {
+    debug.failed("input", error);
+    throw error;
+  }
   let configuredProvider = options.modelProvider;
   const getProvider = () => {
     configuredProvider ??= createConfiguredPlanningProvider();
@@ -138,18 +152,36 @@ export async function planEvent(
     async (participant) => {
       const supplied = suppliedContextAsRaw(participant);
       let loaded: Awaited<ReturnType<ParticipantContextLoader>>;
+      let contextFailed = false;
+      debug.started(
+        "context",
+        { source: supplied ? "supplied" : "silpo-mcp" },
+        participant.id,
+      );
       if (supplied) {
         loaded = { status: "available", data: supplied };
       } else {
         try {
           loaded = await loadParticipantContext(participant.id);
-        } catch {
+        } catch (error) {
+          contextFailed = true;
+          debug.failed("context", error, participant.id);
           loaded = {
             status: "unavailable",
             reason: "Silpo context collection failed.",
           };
         }
       }
+      if (!contextFailed) {
+        debug.completed(
+          "context",
+          loaded.status === "available"
+            ? { status: loaded.status, raw: loaded.data }
+            : loaded,
+          participant.id,
+        );
+      }
+      debug.started("signals", undefined, participant.id);
       const signals =
         loaded.status === "available"
           ? extractParticipantFoodSignals(participant.id, loaded.data)
@@ -161,19 +193,27 @@ export async function planEvent(
               evidence: [],
               completeness: "unavailable",
             });
+      debug.completed("signals", { signals }, participant.id);
       const normalizeAmbiguous =
         options.normalizeParticipantContext ??
         (signals.ambiguousFragments.length > 0
           ? createDefaultNormalizer(getProvider())
           : undefined);
       let foodContext: UserFoodContext;
+      debug.started(
+        "normalization",
+        { mode: normalizeAmbiguous ? "model-assisted" : "deterministic" },
+        participant.id,
+      );
       try {
         foodContext = await normalizeParticipantFoodContext({
           participant,
           signals,
           normalizeAmbiguous,
         });
-      } catch {
+        debug.completed("normalization", { foodContext }, participant.id);
+      } catch (error) {
+        debug.failed("normalization", error, participant.id);
         const fallback = await normalizeParticipantFoodContext({
           participant,
           signals: {
@@ -215,6 +255,7 @@ export async function planEvent(
     },
   );
 
+  debug.started("prompt");
   const groupInput = GroupPlanningInputSchema.parse({
     event: input.event,
     host: input.host,
@@ -229,20 +270,41 @@ export async function planEvent(
       }),
     ),
   });
+  const system = PLANNING_SYSTEM_PROMPT;
+  const prompt = buildPlanningPrompt(groupInput);
+  debug.completed("prompt", { input: groupInput, system, prompt });
   const generatePlan =
     options.generatePlan ?? createDefaultPlanner(getProvider());
   let rawPlan: unknown;
+  debug.started("model");
   try {
     rawPlan = await generatePlan({
       input: groupInput,
-      system: PLANNING_SYSTEM_PROMPT,
-      prompt: buildPlanningPrompt(groupInput),
+      system,
+      prompt,
     });
-  } catch {
+    debug.completed("model", { rawOutput: rawPlan });
+  } catch (error) {
+    debug.failed("model", error);
     throw new PlanningProviderError();
   }
-  const plan = EventPlanSchema.parse(rawPlan);
-  assertEventPlanSafety(groupInput, plan);
+  debug.started("contract");
+  let plan: EventPlan;
+  try {
+    plan = EventPlanSchema.parse(rawPlan);
+    debug.completed("contract", { plan });
+  } catch (error) {
+    debug.failed("contract", error);
+    throw error;
+  }
+  debug.started("safety");
+  try {
+    assertEventPlanSafety(groupInput, plan);
+    debug.completed("safety", { checks: plan.hardConstraintChecks });
+  } catch (error) {
+    debug.failed("safety", error);
+    throw error;
+  }
 
   return { plan, contextTrace: preprocessed.map(({ trace }) => trace) };
 }

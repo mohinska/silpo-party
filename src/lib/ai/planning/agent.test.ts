@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { planEvent } from "./agent";
 import { PlanningProviderError, PlanningSafetyError } from "./errors";
+import type { PlanningDebugEvent } from "./debug-stream";
 import type { EventPlan, GroupPlanningInput } from "./schemas";
 
 const validInput = {
@@ -68,6 +69,78 @@ const safePlan: EventPlan = {
 };
 
 describe("planEvent", () => {
+  it("emits inspectable stages in execution order", async () => {
+    const events: PlanningDebugEvent[] = [];
+
+    await planEvent(validInput, {
+      loadParticipantContext: async () => ({
+        status: "available",
+        data: {
+          silpo_get_my_favorites: {
+            structuredContent: { items: [{ name: "Тофу" }] },
+          },
+        },
+      }),
+      generatePlan: async () => safePlan,
+      onDebugEvent: (event) => events.push(event),
+    });
+
+    expect(events.map(({ stage, status }) => `${stage}:${status}`)).toEqual([
+      "input:started",
+      "input:completed",
+      "context:started",
+      "context:completed",
+      "signals:started",
+      "signals:completed",
+      "normalization:started",
+      "normalization:completed",
+      "prompt:started",
+      "prompt:completed",
+      "model:started",
+      "model:completed",
+      "contract:started",
+      "contract:completed",
+      "safety:started",
+      "safety:completed",
+    ]);
+    expect(events.find(({ stage, status }) =>
+      stage === "context" && status === "completed",
+    )?.data).toMatchObject({
+      raw: {
+        silpo_get_my_favorites: {
+          structuredContent: { items: [{ name: "Тофу" }] },
+        },
+      },
+    });
+    expect(events.find(({ stage, status }) =>
+      stage === "prompt" && status === "completed",
+    )?.data).toMatchObject({
+      system: expect.any(String),
+      prompt: expect.any(String),
+      input: expect.any(Object),
+    });
+  });
+
+  it("emits the original provider failure at the model stage", async () => {
+    const events: PlanningDebugEvent[] = [];
+
+    await expect(
+      planEvent(validInput, {
+        loadParticipantContext: async () => ({ status: "available", data: {} }),
+        generatePlan: async () => {
+          throw new Error("upstream status 429");
+        },
+        onDebugEvent: (event) => events.push(event),
+      }),
+    ).rejects.toBeInstanceOf(PlanningProviderError);
+
+    expect(events.at(-1)).toMatchObject({
+      stage: "model",
+      status: "failed",
+      error: { name: "Error", message: "upstream status 429" },
+    });
+  });
+
   it("validates input before invoking model generation", async () => {
     let generationCalls = 0;
 
