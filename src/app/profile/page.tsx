@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import { getConnectionStatus } from "@/lib/silpo/oauth";
@@ -11,7 +12,7 @@ export default async function ProfilePage({ searchParams }: ProfilePageProps) {
   const supabase = await createClient();
   const [{ data: profile }, connection, params] = await Promise.all([
     supabase.from("profiles").select("allergies, dietary_restrictions, dislikes, preferences").eq("id", user.id).maybeSingle(),
-    getConnectionStatus(user.id),
+    getConnectionStatus(user.id).catch(() => null),
     searchParams,
   ]);
 
@@ -30,6 +31,7 @@ export default async function ProfilePage({ searchParams }: ProfilePageProps) {
   return (
     <main className="page-shell">
       <section className="profile-card">
+        <nav className="topbar"><Link href="/parties">Мої події</Link><Link href="/">Головна</Link></nav>
         <div className="profile-heading">
           <div>
             <p className="eyebrow">Ваш профіль</p>
