@@ -13,7 +13,7 @@ export default async function Home() {
           Враховуємо побажання та обмеження кожного учасника події й складаємо один оптимальний кошик.
         </p>
         {user ? (
-          <Link className="primary-button" href="/profile">Відкрити профіль</Link>
+          <div className="hero-actions"><Link className="primary-button" href="/parties">Мої події</Link><Link className="secondary-button" href="/profile">Профіль</Link></div>
         ) : (
           <a className="google-button" href="/auth/google">
             <span className="google-g">G</span> Увійти через Google
