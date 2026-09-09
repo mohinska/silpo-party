@@ -423,13 +423,15 @@ confirmed sections prevail over superseded interpretations.
   browser receives no Silpo tokens. The server fetches available personal profile,
   restriction and favorites context through each member's own MCP session. Shared-event
   architecture reserves final cart writes for the Host's MCP session.
-- 2026-09-09: Approved a participant-isolated AI preprocessing architecture. Raw
+- 2026-09-09: Implemented the approved participant-isolated AI preprocessing
+  architecture. Raw
   Silpo MCP responses must be deterministically filtered and, only when semantic
   interpretation is needed, normalized separately per participant into a strict,
   compact `UserFoodContext`. The group planner receives only those contexts, food
-  intents, event data and budget. Direct Alibaba Cloud Model Studio in the Frankfurt
-  region with `qwen3.8-flash` is the primary provider, isolated behind an injectable
-  interface. Full histories, orders, promotions, catalogs, product details, contact
+  intents, event data and budget. Direct Alibaba Cloud Model Studio through the
+  international DashScope endpoint with `qwen3.8-flash` is the primary provider,
+  isolated behind an injectable interface. Full histories, orders, promotions,
+  catalogs, product details, contact
   data and unrelated MCP output must not enter the group-planning prompt. Supabase
   changes are permitted when technically necessary, but request-scoped normalization
   does not currently require persistence.

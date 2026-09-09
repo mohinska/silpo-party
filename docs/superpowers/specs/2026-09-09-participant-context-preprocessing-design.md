@@ -17,8 +17,8 @@ none are needed for the request-scoped MVP pipeline.
 ## Provider choice
 
 Production uses Alibaba Cloud Model Studio directly through its OpenAI-compatible
-API, preferably from an EU-scoped Frankfurt workspace. The default model for
-both semantic normalization and group planning is `qwen3.8-flash`.
+international DashScope endpoint. The default model for both semantic
+normalization and group planning is `qwen3.8-flash`.
 
 Provider construction lives in one server-only module. Planning and
 normalization depend on injected AI SDK language models or generation adapters,

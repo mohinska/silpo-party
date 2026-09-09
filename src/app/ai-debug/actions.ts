@@ -7,7 +7,6 @@ import {
   type SerializedDebugError,
 } from "@/lib/ai/planning/debug";
 import { planEvent, type PlanningResult } from "@/lib/ai/planning";
-import { redactSensitiveData } from "@/lib/ai/planning/context";
 import type { EventPlanningInput } from "@/lib/ai/planning/schemas";
 import { getPersonalSilpoContext } from "@/lib/silpo/mcp";
 
@@ -66,9 +65,7 @@ export async function runDebugPlanning(
           };
         }
 
-        const data = redactSensitiveData(context);
-        contextTrace.push({ participantId, status: "available", data });
-        return { status: "available", data };
+        return { status: "available", data: context };
       },
     });
 

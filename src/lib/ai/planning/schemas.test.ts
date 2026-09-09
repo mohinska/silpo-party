@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { EventPlanSchema, EventPlanningInputSchema } from "./schemas";
+import {
+  EventPlanSchema,
+  EventPlanningInputSchema,
+  GroupPlanningInputSchema,
+  ParticipantFoodSignalsSchema,
+  UserFoodContextSchema,
+} from "./schemas";
 
 const validInput = {
   event: {
@@ -84,6 +90,88 @@ describe("EventPlanSchema", () => {
       proposedResolutions: [],
       hardConstraintChecks: [],
       reasoningSummary: "Одна спільна страва.",
+    });
+
+    expect(result.success).toBe(false);
+  });
+});
+
+const normalizedContext = {
+  participantId: "participant-1",
+  hardConstraints: [
+    {
+      id: "declared:allergy-peanut",
+      kind: "allergy",
+      label: "Арахіс",
+      source: "declared",
+      evidenceIds: ["declared:allergy-peanut"],
+    },
+  ],
+  softPreferences: [],
+  dislikes: [],
+  usefulPatterns: [],
+  missingInformation: [],
+  completeness: "complete",
+  evidence: [
+    { id: "declared:allergy-peanut", source: "declared" },
+  ],
+  summary: "Алергія на арахіс.",
+};
+
+describe("participant preprocessing schemas", () => {
+  it("rejects unknown keys at the normalized boundary", () => {
+    expect(
+      UserFoodContextSchema.safeParse({
+        ...normalizedContext,
+        rawMcpResponse: { secret: true },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("bounds ambiguous MCP fragments", () => {
+    const result = ParticipantFoodSignalsSchema.safeParse({
+      participantId: "participant-1",
+      restrictions: [],
+      favorites: [],
+      ambiguousFragments: ["x".repeat(501)],
+      evidence: [],
+      completeness: "partial",
+    });
+
+    expect(result.success).toBe(false);
+  });
+});
+
+describe("GroupPlanningInputSchema", () => {
+  it("accepts only a matching normalized context per participant", () => {
+    const result = GroupPlanningInputSchema.safeParse({
+      ...validInput,
+      participants: [
+        {
+          id: "participant-1",
+          displayName: "Олена",
+          foodIntent: validInput.participants[0].foodIntent,
+          contextStatus: "loaded",
+          foodContext: normalizedContext,
+        },
+      ],
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects a context belonging to another participant", () => {
+    const result = GroupPlanningInputSchema.safeParse({
+      ...validInput,
+      participants: [
+        {
+          id: "participant-1",
+          displayName: "Олена",
+          foodIntent: validInput.participants[0].foodIntent,
+          contextStatus: "loaded",
+          foodContext: { ...normalizedContext, participantId: "participant-2" },
+        },
+      ],
     });
 
     expect(result.success).toBe(false);

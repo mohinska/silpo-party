@@ -21,7 +21,7 @@ export function createSingleParticipantDebugInput({
     event: {
       id: `ai-debug:${userId}`,
       title: "Тест персонального планування",
-      description: "Тимчасова подія для перевірки Gemini та Silpo MCP.",
+      description: "Тимчасова подія для перевірки AI та Silpo MCP.",
       startsAt: startsAt.toISOString(),
       locale: "uk-UA",
       mealNotes: "Не виконувати покупки; лише показати тестовий план.",
@@ -64,7 +64,7 @@ export function serializeDebugError(error: unknown): SerializedDebugError {
   if (error instanceof z.ZodError) {
     return {
       name: error.name,
-      message: "Gemini or backend data did not match the planning contract.",
+      message: "AI model or backend data did not match the planning contract.",
       issues: error.issues,
     };
   }

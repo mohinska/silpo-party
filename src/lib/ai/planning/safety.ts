@@ -1,5 +1,9 @@
 import { PlanningSafetyError, type PlanningSafetyIssue } from "./errors";
-import type { EventPlan, EventPlanningInput } from "./schemas";
+import type {
+  EventPlan,
+  EventPlanningInput,
+  GroupPlanningInput,
+} from "./schemas";
 
 type RequiredConstraint = {
   id: string;
@@ -24,7 +28,7 @@ function pushDuplicateIssues(
 }
 
 export function assertEventPlanSafety(
-  input: EventPlanningInput,
+  input: EventPlanningInput | GroupPlanningInput,
   plan: EventPlan,
 ): void {
   const issues: PlanningSafetyIssue[] = [];
@@ -146,15 +150,24 @@ export function assertEventPlanSafety(
   const constraintsByParticipant = new Map<string, Map<string, RequiredConstraint>>();
   for (const participant of input.participants) {
     const constraints = new Map<string, RequiredConstraint>();
-    for (const allergy of participant.preferences.allergies) {
-      constraints.set(allergy.id, { id: allergy.id, kind: "allergy" });
-    }
-    for (const restriction of participant.preferences.dietaryRestrictions) {
-      if (restriction.strength === "hard") {
-        constraints.set(restriction.id, {
-          id: restriction.id,
-          kind: "hard_restriction",
+    if ("foodContext" in participant) {
+      for (const constraint of participant.foodContext.hardConstraints) {
+        constraints.set(constraint.id, {
+          id: constraint.id,
+          kind: constraint.kind,
         });
+      }
+    } else {
+      for (const allergy of participant.preferences.allergies) {
+        constraints.set(allergy.id, { id: allergy.id, kind: "allergy" });
+      }
+      for (const restriction of participant.preferences.dietaryRestrictions) {
+        if (restriction.strength === "hard") {
+          constraints.set(restriction.id, {
+            id: restriction.id,
+            kind: "hard_restriction",
+          });
+        }
       }
     }
 
@@ -218,7 +231,9 @@ export function assertEventPlanSafety(
       const insight = insightByParticipant.get(participantId);
       if (
         participant &&
-        participant.contextCompleteness !== "complete" &&
+        ("foodContext" in participant
+          ? participant.foodContext.completeness !== "complete"
+          : participant.contextCompleteness !== "complete") &&
         insight &&
         !["loaded", "provided"].includes(insight.contextStatus)
       ) {
