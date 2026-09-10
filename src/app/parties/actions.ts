@@ -10,6 +10,7 @@ import {
   type SilpoProductOption,
 } from "@/lib/silpo/cart";
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { applyMealProposal, createMealProposal, rejectMealProposal } from "@/lib/ai/planning/proposals";
 import { getPartyWorkspace } from "@/lib/parties";
 
@@ -121,12 +122,23 @@ export async function addItem(code: string, formData: FormData) {
     quantity,
     unit_price_cents: selectedProduct.priceCents ?? 0,
     added_by: user.id,
+  }).select("id").single();
+  if (error || !item) throw error ?? new Error("Не вдалося додати товар.");
+  // RLS deliberately prevents browser-authenticated users from setting Silpo
+  // metadata. This action has already verified the MCP product, so persist its
+  // IDs through the server-only service-role client before cart synchronization.
+  const { error: metadataError } = await createAdminClient().from("basket_items").update({
     silpo_product_id: selectedProduct.productId,
     silpo_company_id: selectedProduct.companyId,
     silpo_branch_id: selectedProduct.branchId,
     silpo_image_url: selectedProduct.imageUrl ?? null,
-  }).select("id").single();
-  if (error || !item) throw error ?? new Error("Не вдалося додати товар.");
+    silpo_sync_status: "pending",
+    silpo_sync_error: null,
+  }).eq("id", item.id).eq("party_id", party.id);
+  if (metadataError) {
+    await supabase.from("basket_items").delete().eq("id", item.id);
+    throw metadataError;
+  }
   const { error: shareError } = await supabase.rpc("set_item_shares", {
     target_item_id: item.id,
     owner_ids: [user.id],

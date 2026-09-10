@@ -270,7 +270,9 @@ export async function findSilpoProducts(hostId: string, query: string): Promise<
     });
     const candidates = queryGroups(data, context).get(searchKey(query)) ?? productCandidates(data, context);
     return candidates
-      .filter((candidate) => candidate.companyId && candidate.branchId && availabilityFromProduct(candidate.evidence) !== false)
+      // Search results must explicitly confirm stock in the Host's selected
+      // Silpo branch; unknown or unavailable products are not selectable.
+      .filter((candidate) => candidate.companyId && candidate.branchId && availabilityFromProduct(candidate.evidence) === true)
       .slice(0, 12)
       .map((candidate) => ({
         productId: candidate.productId,
