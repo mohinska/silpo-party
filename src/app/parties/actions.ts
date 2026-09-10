@@ -94,18 +94,16 @@ export async function addItem(code: string, formData: FormData) {
   const { user, supabase, party } = await partyForMember(code);
   if (party.status !== "collecting") throw new Error("Подію вже фіналізовано.");
   const name = clean(formData.get("name"), 120);
-  const unit = clean(formData.get("unit"), 20) || "шт.";
   const quantity = Number(clean(formData.get("quantity"), 20).replace(",", "."));
-  const unitPrice = Number(clean(formData.get("unit_price"), 20).replace(",", "."));
-  if (!name || !Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(unitPrice) || unitPrice < 0) {
-    throw new Error("Перевірте назву, кількість і ціну товару.");
+  if (!name || !Number.isFinite(quantity) || quantity <= 0) {
+    throw new Error("Перевірте назву і кількість товару.");
   }
   const { data: item, error } = await supabase.from("basket_items").insert({
     party_id: party.id,
     name,
-    unit,
+    unit: "шт.",
     quantity,
-    unit_price_cents: Math.round(unitPrice * 100),
+    unit_price_cents: 0,
     added_by: user.id,
   }).select("id").single();
   if (error || !item) throw error ?? new Error("Не вдалося додати товар.");
@@ -125,10 +123,8 @@ export async function updateItem(code: string, itemId: string, formData: FormDat
   const { supabase, party } = await partyForMember(code);
   if (party.status !== "collecting") throw new Error("Подію вже фіналізовано.");
   const name = clean(formData.get("name"), 120);
-  const unit = clean(formData.get("unit"), 20) || "шт.";
   const quantity = Number(clean(formData.get("quantity"), 20).replace(",", "."));
-  const unitPrice = Number(clean(formData.get("unit_price"), 20).replace(",", "."));
-  if (!name || !Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(unitPrice) || unitPrice < 0) {
+  if (!name || !Number.isFinite(quantity) || quantity <= 0) {
     throw new Error("Перевірте дані товару.");
   }
   const { data: current, error: currentError } = await supabase
@@ -140,9 +136,7 @@ export async function updateItem(code: string, itemId: string, formData: FormDat
   if (currentError || !current) throw currentError ?? new Error("Товар не знайдено.");
   const { error } = await supabase.from("basket_items").update({
     name: current.silpo_product_id ? current.name : name,
-    unit: current.silpo_product_id ? current.unit : unit,
     quantity,
-    unit_price_cents: current.silpo_product_id ? current.unit_price_cents : Math.round(unitPrice * 100),
     updated_at: new Date().toISOString(),
   }).eq("id", itemId).eq("party_id", party.id);
   if (error) throw error;
@@ -155,7 +149,7 @@ export async function deleteItem(code: string, itemId: string) {
   if (party.status !== "collecting") throw new Error("Подію вже фіналізовано.");
   const { data: item, error: itemError } = await supabase
     .from("basket_items")
-    .select("id, name, quantity, unit_price_cents, silpo_product_id, silpo_company_id, silpo_branch_id")
+    .select("id, name, quantity, unit, unit_price_cents, silpo_product_id, silpo_company_id, silpo_branch_id")
     .eq("id", itemId)
     .eq("party_id", party.id)
     .single();

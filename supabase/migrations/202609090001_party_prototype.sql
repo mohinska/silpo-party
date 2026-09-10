@@ -87,7 +87,7 @@ begin
   if auth.uid() is null then raise exception 'Authentication required'; end if;
   if char_length(trim(party_title)) not between 1 and 80 then raise exception 'Invalid party title'; end if;
   loop
-    new_code := upper(substr(encode(gen_random_bytes(8), 'hex'), 1, 8));
+    new_code := upper(substr(replace(pg_catalog.gen_random_uuid()::text, '-', ''), 1, 8));
     exit when not exists(select 1 from parties where code = new_code);
   end loop;
   insert into parties(code, title, host_id) values(new_code, trim(party_title), auth.uid()) returning id into new_party_id;
