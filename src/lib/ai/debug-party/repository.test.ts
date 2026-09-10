@@ -52,6 +52,8 @@ function port(overrides: Partial<DebugPartyPersistencePort> = {}): DebugPartyPer
     upsertContext: async (input) => input.context,
     advanceCartRevision: async () => ({ status: "stale", currentRevision: 4 }),
     updateRun: async () => undefined,
+    insertEvidence: async () => undefined,
+    findEvidence: async () => null,
     ...overrides,
   };
 }

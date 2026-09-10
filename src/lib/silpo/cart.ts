@@ -33,6 +33,25 @@ export type SilpoProductOption = {
   imageUrl?: string;
 };
 
+export type SilpoVerifiedProduct = {
+  productId: string;
+  companyId: string;
+  branchId: string;
+  name: string;
+  unit: string;
+  unitPriceCents: number;
+  discountCents: number | null;
+  imageUrl: string | null;
+  available: boolean;
+};
+
+export type SilpoCatalogReader = {
+  search(query: string): Promise<SilpoVerifiedProduct[]>;
+  inspect(productId: string): Promise<SilpoVerifiedProduct[]>;
+};
+
+export type HostCatalogAdapter = <T>(hostId: string, operation: (reader: SilpoCatalogReader) => Promise<T>) => Promise<T>;
+
 type ManagedItem = {
   id: string;
   name: string;
@@ -161,7 +180,7 @@ function buildArguments(
 }
 
 async function callTool(
-  client: Client,
+  client: Pick<Client, "callTool">,
   tools: Map<string, SilpoTool>,
   name: string,
   mode: ToolMode,
@@ -177,7 +196,7 @@ async function callTool(
   return readToolData(result);
 }
 
-async function getCartContext(client: Client, tools: Map<string, SilpoTool>): Promise<CartContext> {
+async function getCartContext(client: Pick<Client, "callTool">, tools: Map<string, SilpoTool>): Promise<CartContext> {
   const active = await callTool(client, tools, "silpo_get_my_shopping_cart", "cart");
   const cartId = stringValue(deepValue(active, ["shoppingCartId", "cartId"]));
   if (!cartId) {
@@ -283,6 +302,95 @@ export async function findSilpoProducts(hostId: string, query: string): Promise<
       }));
   });
 }
+
+/** Bound untrusted MCP trees before reusing the legacy product/context parsers. */
+function boundedCatalogData(value: unknown, depth = 0, budget = { nodes: 0 }): unknown {
+  if (depth > 8 || ++budget.nodes > 2000) return null;
+  if (typeof value === "string") return value.slice(0, 2000);
+  if (Array.isArray(value)) return value.slice(0, 100).map((entry) => boundedCatalogData(entry, depth + 1, budget));
+  const record = objectValue(value);
+  if (record) return Object.fromEntries(Object.entries(record).slice(0, 60).map(([key, entry]) => [key, boundedCatalogData(entry, depth + 1, budget)]));
+  return value;
+}
+
+function verifiedCatalogProducts(data: unknown, context: CartContext): SilpoVerifiedProduct[] {
+  return productCandidates(boundedCatalogData(data), context).slice(0, 12).flatMap((entry) => {
+    const record = objectValue(entry.evidence);
+    const available = record ? availabilityFromProduct(record) : undefined;
+    const unit = entry.displayRatio ?? entry.packageUnit;
+    if (!record || !entry.companyId || !entry.branchId || !unit || available === undefined ||
+      entry.priceCents === undefined || !Number.isSafeInteger(entry.priceCents) || entry.priceCents < 0 ||
+      entry.companyId !== context.companyId || entry.branchId !== context.branchId) return [];
+    const explicitDiscount = numberValue(directValue(record, ["discountCents"]));
+    const oldCents = numberValue(directValue(record, ["oldPriceCents", "regularPriceCents", "originalPriceCents"]));
+    const oldPrice = numberValue(directValue(record, ["oldPrice", "regularPrice", "originalPrice"]));
+    const previous = oldCents ?? (oldPrice === undefined ? undefined : Math.round(oldPrice * 100));
+    const discount = explicitDiscount ?? (previous !== undefined && previous > entry.priceCents ? previous - entry.priceCents : null);
+    const imageUrl = entry.imageUrl && URL.canParse(entry.imageUrl) ? entry.imageUrl : null;
+    if ([entry.productId, entry.companyId, entry.branchId].some((id) => id.length > 200)) return [];
+    return [{ productId: entry.productId, companyId: entry.companyId, branchId: entry.branchId,
+      name: entry.name.slice(0, 500), unit: unit.slice(0, 500), unitPriceCents: entry.priceCents,
+      discountCents: discount !== null && Number.isSafeInteger(discount) && discount > 0 ? discount : null,
+      imageUrl, available }];
+  });
+}
+
+/** Host-scoped read operations only; legacy cart write exports remain separate. */
+export const withSilpoCatalogReader: HostCatalogAdapter = async (hostId, operation) => withSilpoMcp(hostId, async (client, advertised) => {
+  const tools = new Map([...advertised].slice(0, 200).filter(([, tool]) => {
+    if (tool.annotations?.readOnlyHint === false || tool.annotations?.destructiveHint === true) return false;
+    if (/(?:^|_)(add|remove|delete|update|set|create|checkout|submit|cancel|write)(?:_|$)/i.test(tool.name)) return false;
+    if (!/(?:^|_)(get|find|search|list|read|fetch)(?:_|$)/i.test(tool.name) && tool.annotations?.readOnlyHint !== true) return false;
+    const schema = tool.inputSchema;
+    if (!schema || schema.type !== "object") return false;
+    if (schema.required !== undefined && (!Array.isArray(schema.required) || !schema.required.every((key) => typeof key === "string"))) return false;
+    if (schema.properties !== undefined && !objectValue(schema.properties)) return false;
+    return !["allOf", "anyOf", "oneOf", "$ref", "not", "if"].some((key) => key in schema);
+  }));
+  // Keep oversized responses and upstream error bodies outside both agent output and logs.
+  const readClient = {
+    callTool: async (...args: Parameters<Client["callTool"]>) => {
+      try {
+        const result = await client.callTool(...args);
+        if (result.isError) throw new Error("MCP read failed");
+        const envelope = objectValue(result);
+        const text = envelope?.content;
+        if (Array.isArray(text) && text.some((entry) => typeof entry.text === "string" && entry.text.length > 100_000)) throw new Error("MCP response too large");
+        return { structuredContent: boundedCatalogData(readToolData(result)) };
+      } catch {
+        throw new Error("Silpo catalog read failed.");
+      }
+    },
+  } as Pick<Client, "callTool">;
+  const context = await getCartContext(readClient, tools);
+  if (!context.companyId) throw new Error("Host store company is unavailable.");
+  let reads = 0;
+  const read = async (name: string, mode: "find" | "product", options: Parameters<typeof callTool>[5]) => {
+    if (++reads > 8) throw new Error("Silpo catalog read budget exhausted.");
+    return callTool(readClient, tools, name, mode, context, options);
+  };
+  return operation({
+    async search(query) {
+      if (!query.trim() || query.length > 200) throw new Error("Invalid catalog query.");
+      const data = await read("silpo_find_products_batch", "find", { queries: [{ name: query, quantity: 1 }] });
+      return verifiedCatalogProducts(data, context);
+    },
+    async inspect(productId) {
+      if (!productId.trim() || productId.length > 200) throw new Error("Invalid product ID.");
+      const detail = [...tools.keys()].find((name) => /product.*(?:detail|by_?id)|get_product$/i.test(name));
+      if (!detail) throw new Error("Silpo product detail capability is unavailable.");
+      const options = { products: [{ productId, name: "", companyId: context.companyId, branchId: context.branchId, quantity: 1 }] };
+      const data = await read(detail, "product", options);
+      const products = productCandidates(data, context).filter((entry) => entry.productId === productId);
+      // Price/promotion reads may enrich the same identified product; they cannot supply a different ID.
+      for (const name of [...tools.keys()].filter((name) => name !== detail && /product.*(?:price|promotion|availability)/i.test(name)).slice(0, 3)) {
+        const update = productCandidates(await read(name, "product", options), context).find((entry) => entry.productId === productId);
+        if (update) for (const entry of products) entry.evidence = { ...objectValue(entry.evidence), ...objectValue(update.evidence) };
+      }
+      return verifiedCatalogProducts(products.map((entry) => entry.evidence), context);
+    },
+  });
+});
 
 function cartUnitPrice(cart: unknown, productId: string, quantity: number) {
   const queue: unknown[] = [cart];
