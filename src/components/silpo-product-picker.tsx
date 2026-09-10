@@ -49,7 +49,7 @@ export function SilpoProductPicker({ code }: { code: string }) {
       </label>
       <label>
         Кількість
-        <input name="quantity" type="number" min="0.01" max="10000" step="0.01" defaultValue="1" required />
+        <input name="quantity" type="number" min="1" max="10000" step="1" defaultValue="1" required />
       </label>
       <button type="button" className="secondary-button" onClick={search} disabled={isSearching || query.trim().length < 2}>
         {isSearching ? "Шукаємо…" : "Пошук"}

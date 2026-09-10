@@ -11,12 +11,12 @@ import {
   saveIntent,
   setItemShares,
   syncSilpoBasket,
-  updateItem,
 } from "@/app/parties/actions";
 import { CopyInvite } from "@/components/copy-invite";
 import { PartyStages, ShoppingTabs } from "@/components/party-stages";
 import { PendingButton } from "@/components/pending-button";
 import { SilpoProductPicker } from "@/components/silpo-product-picker";
+import { QuantityEditor } from "@/components/quantity-editor";
 import {
   calculateSplit,
   formatMoney,
@@ -270,11 +270,10 @@ export default async function PartyPage({ params }: PageProps<"/party/[code]">) 
           </p>
         )}
         {items.map((item) => {
-          const updater = updateItem.bind(null, party.code, item.id);
           const remover = deleteItem.bind(null, party.code, item.id);
           return (
             <article className="basket-item" key={item.id}>
-              <form action={updater} className="item-main">
+              <div className="item-main">
                 <div className="product-title">
                   <input
                     name="name"
@@ -285,47 +284,34 @@ export default async function PartyPage({ params }: PageProps<"/party/[code]">) 
                   <small className={`sync-label ${item.silpo_sync_status}`}>
                     {item.silpo_sync_status === "synced"
                       ? "У реальному кошику ✓"
-                      : item.silpo_sync_status === "error"
+                    : item.silpo_sync_status === "error"
                         ? "Не синхронізовано"
                         : "Синхронізація…"}
                   </small>
                 </div>
-                <div className="item-numbers">
-                  <input
-                    name="quantity"
-                    type="number"
-                    min="0.01"
-                    step="0.01"
-                    defaultValue={item.quantity}
-                    readOnly={!isOpen}
-                    aria-label="Кількість"
-                  />
-                  <input value={item.unit} readOnly aria-label="Одиниця" />
-                  <span>
-                    {item.unit_price_cents
-                      ? formatMoney(item.unit_price_cents)
-                      : "Ціну визначить Сільпо"}
-                  </span>
-                  <strong>{formatMoney(lineTotalCents(item))}</strong>
-                </div>
+                <QuantityEditor
+                  key={`${item.id}:${item.quantity}:${item.unit_price_cents}`}
+                  code={party.code}
+                  itemId={item.id}
+                  name={item.name}
+                  quantity={item.quantity}
+                  unit={item.unit}
+                  unitPriceCents={item.unit_price_cents}
+                  disabled={!isOpen}
+                />
                 {isOpen && (
-                  <div className="item-actions">
-                    <PendingButton
-                      className="text-button"
-                      pendingLabel="Оновлюємо…"
-                    >
-                      Оновити
+                  <form action={remover} className="item-actions">
+                    <PendingButton className="danger-button" aria-label="Видалити товар" title="Видалити товар" pendingLabel="Видаляємо…">
+                      <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M3 6h18" />
+                        <path d="M8 6V4h8v2" />
+                        <path d="M19 6l-1 14H6L5 6" />
+                        <path d="M10 11v5M14 11v5" />
+                      </svg>
                     </PendingButton>
-                    <PendingButton
-                      className="danger-button"
-                      formAction={remover}
-                      pendingLabel="Видаляємо…"
-                    >
-                      Видалити
-                    </PendingButton>
-                  </div>
+                  </form>
                 )}
-              </form>
+              </div>
               {item.silpo_sync_error && (
                 <p className="notice error">{item.silpo_sync_error}</p>
               )}
@@ -419,7 +405,7 @@ export default async function PartyPage({ params }: PageProps<"/party/[code]">) 
                     className="text-button"
                     pendingLabel="Синхронізуємо…"
                   >
-                    Повторити
+                    Перерахувати з «Сільпо»
                   </PendingButton>
                 </form>
               )}

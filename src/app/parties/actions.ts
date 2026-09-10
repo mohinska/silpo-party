@@ -106,8 +106,8 @@ export async function addItem(code: string, formData: FormData) {
   const companyId = clean(formData.get("silpo_company_id"), 120);
   const branchId = clean(formData.get("silpo_branch_id"), 120);
   const quantity = Number(clean(formData.get("quantity"), 20).replace(",", "."));
-  if (!name || !productId || !companyId || !branchId || !Number.isFinite(quantity) || quantity <= 0) {
-    throw new Error("Оберіть товар зі списку «Сільпо» та вкажіть кількість.");
+  if (!name || !productId || !companyId || !branchId || !Number.isInteger(quantity) || quantity <= 0) {
+    throw new Error("Оберіть товар зі списку «Сільпо» та вкажіть додатну цілу кількість.");
   }
   const selectedProduct = (await findSilpoProducts(party.host_id, name)).find((product) => (
     product.productId === productId
@@ -164,8 +164,8 @@ export async function updateItem(code: string, itemId: string, formData: FormDat
   if (party.status !== "collecting") throw new Error("Подію вже фіналізовано.");
   const name = clean(formData.get("name"), 120);
   const quantity = Number(clean(formData.get("quantity"), 20).replace(",", "."));
-  if (!name || !Number.isFinite(quantity) || quantity <= 0) {
-    throw new Error("Перевірте дані товару.");
+  if (!name || !Number.isInteger(quantity) || quantity <= 0) {
+    throw new Error("Вкажіть додатну цілу кількість товару.");
   }
   const { data: current, error: currentError } = await supabase
     .from("basket_items")
@@ -180,7 +180,6 @@ export async function updateItem(code: string, itemId: string, formData: FormDat
     updated_at: new Date().toISOString(),
   }).eq("id", itemId).eq("party_id", party.id);
   if (error) throw error;
-  await syncPartyBasketToSilpo(party.id, party.host_id);
   revalidatePath(`/party/${party.code}`);
 }
 
