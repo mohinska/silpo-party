@@ -23,6 +23,16 @@ export type CartContext = {
   checkoutUrl?: string;
 };
 
+export type SilpoProductOption = {
+  productId: string;
+  companyId: string;
+  branchId: string;
+  name: string;
+  priceCents?: number;
+  displayRatio?: string;
+  imageUrl?: string;
+};
+
 type ManagedItem = {
   id: string;
   name: string;
@@ -249,6 +259,29 @@ function queryGroups(value: unknown, context: CartContext) {
     const query = group && stringValue(directValue(group, ["query", "search", "searchText"]));
     return query ? [[searchKey(query), productCandidates(directValue(group, ["products", "items", "results"]), context)]] : [];
   }));
+}
+
+/** Returns MCP-ranked, store-specific products for a user to explicitly choose. */
+export async function findSilpoProducts(hostId: string, query: string): Promise<SilpoProductOption[]> {
+  return withSilpoMcp(hostId, async (client, tools) => {
+    const context = await getCartContext(client, tools);
+    const data = await callTool(client, tools, "silpo_find_products_batch", "find", context, {
+      queries: [{ name: query, quantity: 1 }],
+    });
+    const candidates = queryGroups(data, context).get(searchKey(query)) ?? productCandidates(data, context);
+    return candidates
+      .filter((candidate) => candidate.companyId && candidate.branchId && availabilityFromProduct(candidate.evidence) !== false)
+      .slice(0, 12)
+      .map((candidate) => ({
+        productId: candidate.productId,
+        companyId: candidate.companyId!,
+        branchId: candidate.branchId!,
+        name: candidate.name,
+        priceCents: candidate.priceCents,
+        displayRatio: candidate.displayRatio,
+        imageUrl: candidate.imageUrl,
+      }));
+  });
 }
 
 function cartUnitPrice(cart: unknown, productId: string, quantity: number) {

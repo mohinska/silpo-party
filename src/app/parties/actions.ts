@@ -3,7 +3,12 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { requireUser } from "@/lib/auth";
-import { removePartyItemFromSilpo, syncPartyBasketToSilpo } from "@/lib/silpo/cart";
+import {
+  findSilpoProducts,
+  removePartyItemFromSilpo,
+  syncPartyBasketToSilpo,
+  type SilpoProductOption,
+} from "@/lib/silpo/cart";
 import { createClient } from "@/lib/supabase/server";
 import { applyMealProposal, createMealProposal, rejectMealProposal } from "@/lib/ai/planning/proposals";
 import { getPartyWorkspace } from "@/lib/parties";
@@ -96,17 +101,30 @@ export async function addItem(code: string, formData: FormData) {
   const { user, supabase, party } = await partyForMember(code);
   if (party.status !== "collecting") throw new Error("Подію вже фіналізовано.");
   const name = clean(formData.get("name"), 120);
+  const productId = clean(formData.get("silpo_product_id"), 120);
+  const companyId = clean(formData.get("silpo_company_id"), 120);
+  const branchId = clean(formData.get("silpo_branch_id"), 120);
   const quantity = Number(clean(formData.get("quantity"), 20).replace(",", "."));
-  if (!name || !Number.isFinite(quantity) || quantity <= 0) {
-    throw new Error("Перевірте назву і кількість товару.");
+  if (!name || !productId || !companyId || !branchId || !Number.isFinite(quantity) || quantity <= 0) {
+    throw new Error("Оберіть товар зі списку «Сільпо» та вкажіть кількість.");
   }
+  const selectedProduct = (await findSilpoProducts(party.host_id, name)).find((product) => (
+    product.productId === productId
+    && product.companyId === companyId
+    && product.branchId === branchId
+  ));
+  if (!selectedProduct) throw new Error("Обраний товар більше недоступний. Оновіть пошук у «Сільпо».");
   const { data: item, error } = await supabase.from("basket_items").insert({
     party_id: party.id,
-    name,
-    unit: "шт.",
+    name: selectedProduct.name,
+    unit: selectedProduct.displayRatio ?? "шт.",
     quantity,
-    unit_price_cents: 0,
+    unit_price_cents: selectedProduct.priceCents ?? 0,
     added_by: user.id,
+    silpo_product_id: selectedProduct.productId,
+    silpo_company_id: selectedProduct.companyId,
+    silpo_branch_id: selectedProduct.branchId,
+    silpo_image_url: selectedProduct.imageUrl ?? null,
   }).select("id").single();
   if (error || !item) throw error ?? new Error("Не вдалося додати товар.");
   const { error: shareError } = await supabase.rpc("set_item_shares", {
@@ -119,6 +137,14 @@ export async function addItem(code: string, formData: FormData) {
   }
   await syncPartyBasketToSilpo(party.id, party.host_id);
   revalidatePath(`/party/${party.code}`);
+}
+
+export async function searchSilpoProducts(code: string, query: string): Promise<SilpoProductOption[]> {
+  const { party } = await partyForMember(code);
+  if (party.status !== "collecting") throw new Error("Подію вже фіналізовано.");
+  const cleanedQuery = clean(query, 120);
+  if (cleanedQuery.length < 2) throw new Error("Введіть щонайменше 2 символи для пошуку.");
+  return findSilpoProducts(party.host_id, cleanedQuery);
 }
 
 export async function updateItem(code: string, itemId: string, formData: FormData) {

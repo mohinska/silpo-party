@@ -1,7 +1,6 @@
 import Link from "next/link";
 import { headers } from "next/headers";
 import {
-  addItem,
   confirmAiProposal,
   deleteItem,
   finalizeParty,
@@ -17,6 +16,7 @@ import {
 import { CopyInvite } from "@/components/copy-invite";
 import { PartyStages, ShoppingTabs } from "@/components/party-stages";
 import { PendingButton } from "@/components/pending-button";
+import { SilpoProductPicker } from "@/components/silpo-product-picker";
 import {
   calculateSplit,
   formatMoney,
@@ -255,37 +255,7 @@ export default async function PartyPage({ params }: PageProps<"/party/[code]">) 
   const basket = (
     <div className="stage-stack compact-stack">
       {isOpen && hostConnected && (
-        <form
-          action={addItem.bind(null, party.code)}
-          className="add-item-form"
-        >
-          <label>
-            Пошук у «Сільпо»
-            <input
-              name="name"
-              required
-              placeholder="Наприклад, Молоко Галичина 3,2%"
-            />
-          </label>
-          <label>
-            Кількість
-            <input
-              name="quantity"
-              type="number"
-              min="0.01"
-              max="10000"
-              step="0.01"
-              defaultValue="1"
-              required
-            />
-          </label>
-          <PendingButton
-            className="primary-button"
-            pendingLabel="Шукаємо…"
-          >
-            Знайти й додати
-          </PendingButton>
-        </form>
+        <SilpoProductPicker code={party.code} />
       )}
       {isOpen && !hostConnected && (
         <p className="notice">
