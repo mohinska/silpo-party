@@ -185,9 +185,15 @@ async function getCartContext(client: Client, tools: Map<string, SilpoTool>): Pr
     checkoutUrl: stringValue(deepValue(details, ["checkoutWebLink", "checkoutUrl", "checkoutMobileLink"])),
   };
   if (!context.branchId) throw new Error("У кошику Host не вибрано магазин або спосіб доставки.");
-  if (tools.has("silpo_get_time_slots") && context.deliveryType) {
-    await callTool(client, tools, "silpo_get_time_slots", "timeslots", context);
+  if (!context.deliveryType || !context.timeslotStart || !context.timeslotEnd) {
+    throw new Error("У кошику Host не вибрано дійсний слот доставки або самовивозу.");
   }
+  if (!tools.has("silpo_get_time_slots")) {
+    throw new Error("Silpo MCP не підтримує обов’язкову перевірку слота доставки.");
+  }
+  // This MCP tool is the authoritative slot validator. `callTool` propagates a
+  // validation error and prevents every later search or cart-mutation step.
+  await callTool(client, tools, "silpo_get_time_slots", "timeslots", context);
   return context;
 }
 
@@ -230,10 +236,6 @@ function productCandidates(value: unknown, context: CartContext): ResolvedProduc
   return [...new Map(candidates.map((candidate) => [candidate.productId, candidate])).values()];
 }
 
-function catalogQuery(name: string) {
-  return name.replace(/кока[\s-]*кола/giu, "Coca-Cola");
-}
-
 function searchKey(value: string) {
   return value.toLocaleLowerCase("uk-UA").match(/[\p{L}\p{N}]+/gu)?.join("") ?? value.toLocaleLowerCase("uk-UA");
 }
@@ -274,27 +276,24 @@ function cartUnitPrice(cart: unknown, productId: string, quantity: number) {
   return undefined;
 }
 
-function similarity(query: string, candidate: string) {
-  const words = query.toLocaleLowerCase("uk-UA").match(/[\p{L}\p{N}]+/gu) ?? [query.toLocaleLowerCase("uk-UA")];
-  const target = candidate.toLocaleLowerCase("uk-UA");
-  return words.reduce((score, word) => score + (target.includes(word) ? word.length : 0), 0);
-}
-
 async function resolveProducts(client: Client, tools: Map<string, SilpoTool>, context: CartContext, items: ManagedItem[]) {
   const products = new Map<string, ResolvedProduct>();
   const errors = new Map<string, string>();
   if (!items.length) return { products, errors };
-  const queries = items.map((item) => ({ name: catalogQuery(item.name), quantity: Number(item.quantity) }));
+  const queries = items.map((item) => ({ name: item.name, quantity: Number(item.quantity) }));
   const data = await callTool(client, tools, "silpo_find_products_batch", "find", context, {
     queries,
   });
   const grouped = queryGroups(data, context);
-  const allCandidates = productCandidates(data, context);
   items.forEach((item, index) => {
     const query = queries[index].name;
-    const candidates = grouped.get(searchKey(query)) ?? allCandidates;
-    const product = [...candidates].sort((left, right) => similarity(query, right.name) - similarity(query, left.name))[0];
-    if (!product || similarity(query, product.name) === 0) {
+    // A batch result must identify which products belong to which query. Do not
+    // fall back to another query's products and risk adding the wrong item.
+    const candidates = grouped.get(searchKey(query)) ?? (items.length === 1 ? productCandidates(data, context) : []);
+    // Silpo MCP owns search relevance. Its first result is used unchanged rather
+    // than re-ranking it locally with title heuristics.
+    const product = candidates[0];
+    if (!product) {
       errors.set(item.id, `«Сільпо» не знайшло товар за запитом «${item.name}». Спробуйте точнішу назву з каталогу.`);
     } else if (!product.companyId) {
       errors.set(item.id, `Для товару «${product.name}» MCP не повернув companyId.`);
@@ -351,8 +350,6 @@ export async function resolveSilpoProposalProducts(hostId: string, requirements:
     const entries: Array<readonly [string, CatalogProduct[]]> = [];
     for (const [index, requirement] of requirements.entries()) {
       const candidates = (grouped.get(searchKey(queries[index].name)) ?? all)
-        .filter((candidate) => similarity(queries[index].name, candidate.name) > 0)
-        .sort((left, right) => similarity(queries[index].name, right.name) - similarity(queries[index].name, left.name))
         .slice(0, 8);
       const sanitized: CatalogProduct[] = [];
       for (const candidate of candidates) {
