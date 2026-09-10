@@ -299,6 +299,7 @@ export const PlannedDishSchema = z
     eaterParticipantIds: z.array(OpaqueId).min(1),
     servings: z.number().int().positive(),
     ingredients: z.array(PlanIngredientSchema).min(1),
+    readyMealQuery: NonEmptyText.max(160).optional(),
     reasoningSummary: NonEmptyText.max(400),
   })
   .strict();

@@ -3,6 +3,7 @@ import "server-only";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { readToolData, type SilpoTool, withSilpoMcp } from "@/lib/silpo/mcp";
+import type { CatalogProduct, MergedIngredient, ProductLine, Unit } from "@/lib/ai/planning/proposal-schemas";
 
 type JsonSchema = {
   type?: string;
@@ -12,7 +13,7 @@ type JsonSchema = {
   enum?: unknown[];
 };
 
-type CartContext = {
+export type CartContext = {
   cartId: string;
   branchId?: string;
   companyId?: string;
@@ -42,9 +43,12 @@ type ResolvedProduct = {
   slug?: string;
   imageUrl?: string;
   displayRatio?: string;
+  packageQuantity?: number;
+  packageUnit?: Unit;
+  evidence?: unknown;
 };
 
-type ToolMode = "cart" | "timeslots" | "find" | "add" | "remove";
+type ToolMode = "cart" | "timeslots" | "find" | "add" | "remove" | "product";
 
 function normalized(value: string) {
   return value.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -135,7 +139,7 @@ function buildArguments(
         : products.map((entry) => buildNestedObject(property.items, { product: entry, quantity: entry.quantity }));
     } else if (["productids", "ids"].includes(name) && mode === "remove") {
       result[key] = (options.products ?? []).map((entry) => entry.productId);
-    } else if (name === "productid" && options.products?.[0]) result[key] = options.products[0].productId;
+    } else if ((name === "productid" || (name === "id" && mode === "product")) && options.products?.[0]) result[key] = options.products[0].productId;
     else if (["quantity", "count", "amount"].includes(name) && options.products?.[0]) result[key] = options.products[0].quantity;
   }
 
@@ -204,16 +208,21 @@ function productCandidates(value: unknown, context: CartContext): ResolvedProduc
     const productId = stringValue(directValue(record, ["productId", "id"]));
     const title = stringValue(directValue(record, ["name", "title", "productName"]));
     if (productId && title) {
-      const rawPrice = numberValue(directValue(record, ["currentPrice", "salePrice", "price", "priceValue"]));
+      const explicitCents = numberValue(directValue(record, ["priceCents", "priceInCents"]));
+      const currencyPrice = numberValue(directValue(record, ["currentPrice", "salePrice", "price", "priceValue"]));
+      const packaging = packageData(record);
       candidates.push({
         productId,
         companyId: stringValue(directValue(record, ["companyId"])) ?? context.companyId,
         branchId: stringValue(directValue(record, ["branchId"])) ?? context.branchId,
         name: title,
-        priceCents: rawPrice === undefined ? undefined : Math.round(rawPrice > 10_000 ? rawPrice : rawPrice * 100),
+        priceCents: explicitCents === undefined ? currencyPrice === undefined ? undefined : Math.round(currencyPrice * 100) : Math.round(explicitCents),
         slug: stringValue(directValue(record, ["slug"])),
         imageUrl: stringValue(directValue(record, ["imageUrl", "image", "photoUrl"])),
         displayRatio: stringValue(directValue(record, ["displayRatio", "unit"])),
+        packageQuantity: packaging?.quantity,
+        packageUnit: packaging?.unit,
+        evidence: record,
       });
     }
     queue.push(...Object.values(record).filter((nested) => typeof nested === "object" && nested !== null));
@@ -298,6 +307,118 @@ async function resolveProducts(client: Client, tools: Map<string, SilpoTool>, co
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message.slice(0, 1000) : "Невідома помилка синхронізації «Сільпо».";
+}
+
+function packageData(value: unknown): { quantity: number; unit: Unit } | undefined {
+  const rawQuantity = numberValue(deepValue(value, ["packageQuantity", "netWeight", "weight", "volume"]));
+  const rawUnit = stringValue(deepValue(value, ["packageUnit", "weightUnit", "unitOfMeasure", "unit"]));
+  const ratio = stringValue(deepValue(value, ["displayRatio", "packageSize"]));
+  const ratioMatch = ratio?.match(/(\d+(?:[.,]\d+)?)\s*(кг|kg|г|g|мл|ml|л|l|шт|pcs?)/iu);
+  const quantity = rawQuantity ?? (ratioMatch ? Number(ratioMatch[1].replace(",", ".")) : undefined);
+  const token = (rawUnit ?? ratioMatch?.[2] ?? "").toLocaleLowerCase("uk-UA").replace(/[.\s]/g, "");
+  if (!quantity || !token) return undefined;
+  if (["kg", "kilogram", "kilograms", "кг"].includes(token)) return { quantity: quantity * 1000, unit: "g" };
+  if (["g", "gram", "grams", "г"].includes(token)) return { quantity, unit: "g" };
+  if (["l", "liter", "liters", "л"].includes(token)) return { quantity: quantity * 1000, unit: "ml" };
+  if (["ml", "milliliter", "milliliters", "мл"].includes(token)) return { quantity, unit: "ml" };
+  if (["piece", "pieces", "pcs", "pc", "шт"].includes(token)) return { quantity, unit: "piece" };
+  return undefined;
+}
+
+function availabilityFromProduct(value: unknown) {
+  const explicit = deepValue(value, ["available", "isAvailable", "inStock"]);
+  if (typeof explicit === "boolean") return explicit;
+  const stock = numberValue(deepValue(value, ["stockQuantity", "availableQuantity"]));
+  return stock === undefined ? undefined : stock > 0;
+}
+
+function safetyFromProduct(value: unknown, requirement: MergedIngredient) {
+  if (requirement.variant === "standard" && !requirement.readyMeal) return "safe" as const;
+  const serialized = JSON.stringify(value).toLocaleLowerCase("uk-UA");
+  const wanted = requirement.variant.toLocaleLowerCase("uk-UA");
+  return wanted !== "standard" && serialized.includes(wanted) ? "safe" as const : "uncertain" as const;
+}
+
+/** Read-only catalog resolution in the Host's active cart/store context. */
+export async function resolveSilpoProposalProducts(hostId: string, requirements: MergedIngredient[]) {
+  return withSilpoMcp(hostId, async (client, tools) => {
+    const context = await getCartContext(client, tools);
+    const queries = requirements.map((item) => ({ name: `${item.name}${item.variant === "standard" ? "" : ` ${item.variant}`}`, quantity: item.quantity }));
+    const data = await callTool(client, tools, "silpo_find_products_batch", "find", context, { queries });
+    const grouped = queryGroups(data, context);
+    const all = productCandidates(data, context);
+    const detailTool = [...tools.keys()].find((name) => /silpo.*product.*(detail|by.?id)/i.test(name));
+    const entries: Array<readonly [string, CatalogProduct[]]> = [];
+    for (const [index, requirement] of requirements.entries()) {
+      const candidates = (grouped.get(searchKey(queries[index].name)) ?? all)
+        .filter((candidate) => similarity(queries[index].name, candidate.name) > 0)
+        .sort((left, right) => similarity(queries[index].name, right.name) - similarity(queries[index].name, left.name))
+        .slice(0, 8);
+      const sanitized: CatalogProduct[] = [];
+      for (const candidate of candidates) {
+        let evidence = candidate.evidence;
+        let safety = safetyFromProduct(evidence, requirement);
+        if (safety === "uncertain" && detailTool) {
+          evidence = await callTool(client, tools, detailTool, "product", context, { products: [{ ...candidate, quantity: 1 }] });
+          safety = safetyFromProduct(evidence, requirement);
+        }
+        const available = availabilityFromProduct(evidence);
+        const packaging = packageData(evidence) ?? (candidate.packageQuantity && candidate.packageUnit ? { quantity: candidate.packageQuantity, unit: candidate.packageUnit } : undefined);
+        const readyMeal = /готов.{0,12}(страв|їж)|кулінар/iu.test(JSON.stringify(evidence));
+        if (!candidate.companyId || !candidate.branchId || candidate.priceCents === undefined || !packaging || available === undefined) continue;
+        sanitized.push({ productId: candidate.productId, companyId: candidate.companyId, branchId: candidate.branchId, name: candidate.name, packageQuantity: packaging.quantity, packageUnit: packaging.unit, priceCents: candidate.priceCents, available, dietarySafety: safety, readyMeal, productUrl: candidate.slug ? `https://silpo.ua/product/${candidate.slug}` : undefined, imageUrl: candidate.imageUrl });
+      }
+      entries.push([requirement.key, sanitized] as const);
+    }
+    return new Map(entries);
+  });
+}
+
+type StoredCartLine = { silpo_product_id?: string | null; silpo_company_id?: string | null; silpo_branch_id?: string | null; quantity?: number | string; name?: string };
+
+export async function writeSilpoProposalLines(hostId: string, lines: ProductLine[], manualLines: StoredCartLine[] = [], previousAiLines: StoredCartLine[] = []) {
+  return withSilpoMcp(hostId, async (client, tools) => {
+    const context = await getCartContext(client, tools);
+    if (lines.length) await callTool(client, tools, "silpo_add_or_update_cart_products", "add", context, {
+      products: lines.map((line) => ({ productId: line.productId, companyId: line.companyId, branchId: line.branchId, name: line.name, quantity: line.packageCount + manualLines.filter((item) => item.silpo_product_id === line.productId && (item.silpo_company_id ?? line.companyId) === line.companyId && (item.silpo_branch_id ?? line.branchId) === line.branchId).reduce((sum, item) => sum + Number(item.quantity ?? 0), 0) })),
+    });
+    const desired = new Set(lines.map((line) => `${line.productId}|${line.companyId}|${line.branchId}`));
+    const stale = new Map<string, ResolvedProduct & { quantity: number }>();
+    for (const old of previousAiLines) {
+      if (!old.silpo_product_id) continue;
+      const companyId = old.silpo_company_id ?? context.companyId;
+      const branchId = old.silpo_branch_id ?? context.branchId;
+      const key = `${old.silpo_product_id}|${companyId ?? ""}|${branchId ?? ""}`;
+      if (desired.has(key)) continue;
+      const manualQuantity = manualLines.filter((item) => item.silpo_product_id === old.silpo_product_id && (item.silpo_company_id ?? companyId) === companyId && (item.silpo_branch_id ?? branchId) === branchId).reduce((sum, item) => sum + Number(item.quantity ?? 0), 0);
+      stale.set(key, { productId: old.silpo_product_id, companyId, branchId, name: old.name ?? old.silpo_product_id, quantity: manualQuantity });
+    }
+    const retained = [...stale.values()].filter(({ quantity }) => quantity > 0);
+    const removed = [...stale.values()].filter(({ quantity }) => quantity === 0);
+    if (retained.length) await callTool(client, tools, "silpo_add_or_update_cart_products", "add", context, { products: retained });
+    if (removed.length) await callTool(client, tools, "silpo_remove_cart_products", "remove", context, { products: removed });
+    return context;
+  });
+}
+
+export async function readSilpoCartSnapshot(hostId: string) {
+  return withSilpoMcp(hostId, async (client, tools) => {
+    const context = await getCartContext(client, tools);
+    const cart = await callTool(client, tools, "silpo_get_shopping_cart_by_id", "cart", context);
+    const lines: Array<{ productId: string; companyId: string; branchId: string; quantity: number }> = [];
+    const queue: unknown[] = [cart];
+    while (queue.length) {
+      const current = queue.shift();
+      if (Array.isArray(current)) { queue.push(...current); continue; }
+      const record = objectValue(current);
+      if (!record) continue;
+      const productId = stringValue(directValue(record, ["productId"]));
+      const quantity = numberValue(directValue(record, ["quantity", "count", "amount"]));
+      if (productId && quantity !== undefined) lines.push({ productId, companyId: stringValue(directValue(record, ["companyId"])) ?? context.companyId ?? "", branchId: stringValue(directValue(record, ["branchId"])) ?? context.branchId ?? "", quantity });
+      queue.push(...Object.values(record).filter((value) => value && typeof value === "object"));
+    }
+    return { context, lines };
+  });
 }
 
 export async function syncPartyBasketToSilpo(partyId: string, hostId: string) {
