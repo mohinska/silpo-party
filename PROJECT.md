@@ -467,6 +467,10 @@ confirmed sections prevail over superseded interpretations.
   mutate only the Host's active Silpo cart. MCP failures are stored for retry; tokens
   remain encrypted and server-only. Friends still need app accounts, while their own
   Silpo connections remain optional.
+- 2026-09-10: Switched the existing OpenAI-compatible AI planning provider from
+  Alibaba/Qwen to DeepSeek. Normalization and group planning remain independently
+  configurable and default to the cost-efficient `deepseek-v4-flash`; the provider
+  abstraction, agent contracts and strict Zod schemas are unchanged.
 
 ## Contradictions resolved and ambiguity retained
 

@@ -8,19 +8,19 @@ import {
 } from "./provider";
 
 const validEnvironment = {
-  AI_PROVIDER: "alibaba",
+  AI_PROVIDER: "deepseek",
   AI_API_KEY: "test-key",
-  AI_BASE_URL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+  AI_BASE_URL: "https://api.deepseek.com",
 };
 
 describe("resolvePlanningProviderConfig", () => {
-  it("defaults both roles to qwen3.8-flash", () => {
+  it("defaults both roles to deepseek-v4-flash", () => {
     expect(resolvePlanningProviderConfig(validEnvironment)).toEqual({
-      provider: "alibaba",
+      provider: "deepseek",
       apiKey: "test-key",
       baseUrl: validEnvironment.AI_BASE_URL,
-      normalizerModel: "qwen3.8-flash",
-      plannerModel: "qwen3.8-flash",
+      normalizerModel: "deepseek-v4-flash",
+      plannerModel: "deepseek-v4-flash",
     });
   });
 
@@ -35,7 +35,7 @@ describe("resolvePlanningProviderConfig", () => {
 
   it("rejects missing server credentials", () => {
     expect(() =>
-      resolvePlanningProviderConfig({ AI_PROVIDER: "alibaba" }),
+      resolvePlanningProviderConfig({ AI_PROVIDER: "deepseek" }),
     ).toThrow(/AI_API_KEY/i);
   });
 });
@@ -44,13 +44,15 @@ describe("createConfiguredPlanningProvider", () => {
   it("creates independently selectable models behind one provider", () => {
     const provider = createConfiguredPlanningProvider({
       ...validEnvironment,
-      AI_NORMALIZER_MODEL: "qwen-normalizer-test",
-      AI_PLANNER_MODEL: "qwen-planner-test",
+      AI_NORMALIZER_MODEL: "deepseek-normalizer-test",
+      AI_PLANNER_MODEL: "deepseek-planner-test",
     });
 
     expect(provider.participantNormalizerModel().modelId).toBe(
-      "qwen-normalizer-test",
+      "deepseek-normalizer-test",
     );
-    expect(provider.groupPlannerModel().modelId).toBe("qwen-planner-test");
+    expect(provider.groupPlannerModel().modelId).toBe(
+      "deepseek-planner-test",
+    );
   });
 });

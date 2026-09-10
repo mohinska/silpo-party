@@ -72,16 +72,17 @@ participant/context IDs.
 normalization and group planning. Business logic imports no provider-specific
 model SDK.
 
-Production uses Alibaba Cloud Model Studio through `@ai-sdk/openai-compatible`
-and the international DashScope endpoint. Both roles default to
-`qwen3.8-flash` and can be changed independently:
+Production uses DeepSeek through `@ai-sdk/openai-compatible` and the official
+OpenAI-compatible API endpoint. Both roles default to the cost-efficient
+`deepseek-v4-flash` and can be changed independently, allowing the planner to
+move to `deepseek-v4-pro` later without changing the normalizer:
 
 ```env
-AI_PROVIDER=alibaba
+AI_PROVIDER=deepseek
 AI_API_KEY=...
-AI_BASE_URL=https://dashscope-intl.aliyuncs.com/compatible-mode/v1
-AI_NORMALIZER_MODEL=qwen3.8-flash
-AI_PLANNER_MODEL=qwen3.8-flash
+AI_BASE_URL=https://api.deepseek.com
+AI_NORMALIZER_MODEL=deepseek-v4-flash
+AI_PLANNER_MODEL=deepseek-v4-flash
 ```
 
 Tests inject generation adapters or a model provider and require no network or
