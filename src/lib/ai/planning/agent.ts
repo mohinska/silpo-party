@@ -1,4 +1,10 @@
-import { generateText, Output } from "ai";
+import {
+  generateText,
+  NoObjectGeneratedError,
+  Output,
+  type LanguageModel,
+} from "ai";
+import { z, type ZodType } from "zod";
 
 import type {
   ParticipantContextLoader,
@@ -51,18 +57,60 @@ export type PlanningResult = {
   contextTrace: ParticipantContextTraceEntry[];
 };
 
+async function generateValidatedJson<T>({
+  model,
+  system,
+  prompt,
+  schema,
+}: {
+  model: LanguageModel;
+  system: string;
+  prompt: string;
+  schema: ZodType<T>;
+}): Promise<T> {
+  const schemaInstruction = `Return only one complete JSON object with no Markdown or commentary. The JSON must match this JSON Schema exactly:\n${JSON.stringify(z.toJSONSchema(schema))}`;
+  let correction = "";
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let output: unknown;
+    try {
+      const result = await generateText({
+        model,
+        system: `${system}\n\n${schemaInstruction}`,
+        prompt: `${prompt}${correction}`,
+        output: Output.json(),
+      });
+      output = result.output;
+    } catch (error) {
+      if (attempt === 1 || !NoObjectGeneratedError.isInstance(error)) {
+        throw error;
+      }
+      correction =
+        "\n\nThe previous response was not valid JSON. Return a complete corrected JSON object matching the supplied schema.";
+      continue;
+    }
+
+    const validation = schema.safeParse(output);
+    if (validation.success) return validation.data;
+    if (attempt === 1) throw validation.error;
+
+    correction = `\n\nThe previous JSON did not match the required schema. Correct it and return the complete JSON object again. Validation errors:\n${JSON.stringify(validation.error.issues)}\nPrevious JSON:\n${JSON.stringify(output)}`;
+  }
+
+  throw new Error("JSON generation exhausted its validation attempts.");
+}
+
 function createDefaultNormalizer(
   provider: PlanningModelProvider,
 ): ParticipantNormalizationAdapter {
   return async ({ participantId, signals }) => {
-    const result = await generateText({
+    return generateValidatedJson({
       model: provider.participantNormalizerModel(),
       system:
         "Normalize only the supplied bounded food signals. Do not invent allergies or treat missing data as unrestricted. Return concise Ukrainian summaries.",
       prompt: `Return a normalized food context for ${participantId} as JSON: ${JSON.stringify(signals)}`,
-      output: Output.object({ schema: UserFoodContextSchema }),
+      schema: UserFoodContextSchema,
     });
-    return result.output;
   };
 }
 
@@ -70,13 +118,12 @@ function createDefaultPlanner(
   provider: PlanningModelProvider,
 ): PlanGenerationAdapter {
   return async ({ system, prompt }) => {
-    const result = await generateText({
+    return generateValidatedJson({
       model: provider.groupPlannerModel(),
       system,
       prompt,
-      output: Output.object({ schema: EventPlanSchema }),
+      schema: EventPlanSchema,
     });
-    return result.output;
   };
 }
 

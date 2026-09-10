@@ -58,7 +58,7 @@ export function createConfiguredPlanningProvider(
     name: config.provider,
     apiKey: config.apiKey,
     baseURL: config.baseUrl,
-    supportsStructuredOutputs: true,
+    supportsStructuredOutputs: false,
   });
 
   return {
