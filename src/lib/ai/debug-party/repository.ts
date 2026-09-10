@@ -6,11 +6,13 @@ import {
   DebugParticipantContextSchema,
   DebugPartyMemberSchema,
   DebugPartySchema,
+  DebugProductEvidenceSchema,
   type DebugCartItem,
   type DebugFoodIntent,
   type DebugParticipantContext,
   type DebugParty,
   type DebugPartyMember,
+  type DebugProductEvidence,
 } from "./schemas";
 
 type UnknownRow = Record<string, unknown>;
@@ -103,6 +105,11 @@ export type ReplaceContextInput = z.infer<typeof ReplaceContextSchema>;
 export type CompleteRunInput = z.infer<typeof CompleteRunSchema>;
 export type DebugAgentRun = z.infer<typeof DebugAgentRunSchema>;
 
+const FindEvidenceSchema = z.strictObject({ partyId: IdSchema, actorId: IdSchema, evidenceId: IdSchema });
+const SaveEvidenceSchema = z.strictObject({ partyId: IdSchema, actorId: IdSchema, evidence: DebugProductEvidenceSchema });
+export type FindEvidenceInput = z.infer<typeof FindEvidenceSchema>;
+export type SaveEvidenceInput = z.infer<typeof SaveEvidenceSchema>;
+
 export type DebugPartyWorkspace = {
   party: DebugParty;
   member: DebugPartyMember;
@@ -143,6 +150,8 @@ export interface DebugPartyPersistencePort {
   upsertContext(input: ReplaceContextInput): Promise<unknown>;
   advanceCartRevision(input: ApplyCartCommandInput): Promise<unknown>;
   updateRun(input: CompleteRunInput): Promise<unknown>;
+  insertEvidence(input: SaveEvidenceInput): Promise<unknown>;
+  findEvidence(input: FindEvidenceInput): Promise<unknown | null>;
 }
 
 function object(value: unknown, label: string): UnknownRow {
@@ -252,6 +261,17 @@ function mapRun(value: unknown): DebugAgentRun {
   });
 }
 
+function mapEvidence(value: unknown): DebugProductEvidence {
+  const row = object(value, "Product evidence");
+  return DebugProductEvidenceSchema.parse({
+    id: row.id, partyId: row.party_id, runId: row.run_id, source: row.source,
+    productId: row.product_id, companyId: row.company_id, branchId: row.branch_id,
+    name: row.name, unit: row.unit, unitPriceCents: row.unit_price_cents,
+    discountCents: row.discount_cents, imageUrl: row.image_url, available: row.available,
+    observedAt: row.observed_at, createdAt: row.created_at,
+  });
+}
+
 function rpcMutation(mutation: CartMutation): Record<string, unknown> {
   switch (mutation.type) {
     case "add":
@@ -328,6 +348,27 @@ export class DebugPartyRepository {
     const parsed = CompleteRunSchema.parse(input);
     await this.requireMembership(parsed.partyId, parsed.actorId);
     await this.persistence.updateRun(parsed);
+  }
+
+  async saveEvidence(input: SaveEvidenceInput): Promise<DebugProductEvidence> {
+    const parsed = SaveEvidenceSchema.parse(input);
+    await this.requireMembership(parsed.partyId, parsed.actorId);
+    if (parsed.evidence.partyId !== parsed.partyId) throw new Error("Product evidence does not match party.");
+    const saved = mapEvidence(await this.persistence.insertEvidence(parsed));
+    if (saved.partyId !== parsed.partyId || saved.runId !== parsed.evidence.runId || saved.id !== parsed.evidence.id) {
+      throw new Error("Product evidence provenance does not match.");
+    }
+    return saved;
+  }
+
+  async findEvidence(input: FindEvidenceInput): Promise<DebugProductEvidence | null> {
+    const parsed = FindEvidenceSchema.parse(input);
+    await this.requireMembership(parsed.partyId, parsed.actorId);
+    const row = await this.persistence.findEvidence(parsed);
+    if (!row) return null;
+    const evidence = mapEvidence(row);
+    if (evidence.partyId !== parsed.partyId || evidence.id !== parsed.evidenceId) return null;
+    return evidence;
   }
 
   private async requireMembership(partyId: string, actorId: string): Promise<DebugPartyMember> {
@@ -453,6 +494,26 @@ export async function createDebugPartyRepository(): Promise<DebugPartyRepository
         updated_at: new Date().toISOString(),
       }).eq("id", input.runId).eq("party_id", input.partyId);
       if (error) throw error;
+    },
+
+    async insertEvidence({ evidence }) {
+      const { data, error } = await admin.from("debug_product_evidence").insert({
+        id: evidence.id, party_id: evidence.partyId, run_id: evidence.runId, source: evidence.source,
+        product_id: evidence.productId, company_id: evidence.companyId, branch_id: evidence.branchId,
+        name: evidence.name, unit: evidence.unit, unit_price_cents: evidence.unitPriceCents,
+        discount_cents: evidence.discountCents, image_url: evidence.imageUrl, available: evidence.available,
+        observed_at: evidence.observedAt, created_at: evidence.createdAt,
+      }).select("id, party_id, run_id, source, product_id, company_id, branch_id, name, unit, unit_price_cents, discount_cents, image_url, available, observed_at, created_at").single();
+      if (error) throw error;
+      return data;
+    },
+
+    async findEvidence({ partyId, evidenceId }) {
+      const { data, error } = await authenticated.from("debug_product_evidence")
+        .select("id, party_id, run_id, source, product_id, company_id, branch_id, name, unit, unit_price_cents, discount_cents, image_url, available, observed_at, created_at")
+        .eq("party_id", partyId).eq("id", evidenceId).maybeSingle();
+      if (error) throw error;
+      return data;
     },
   });
 }
