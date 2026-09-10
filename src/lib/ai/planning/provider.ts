@@ -9,7 +9,7 @@ type PlanningEnvironment = Record<string, string | undefined>;
 type PlanningLanguageModel = ReturnType<OpenAICompatibleProvider>;
 
 export type PlanningProviderConfig = {
-  provider: "alibaba";
+  provider: "deepseek";
   apiKey: string;
   baseUrl: string;
   normalizerModel: string;
@@ -32,8 +32,8 @@ function required(environment: PlanningEnvironment, name: keyof PlanningEnvironm
 export function resolvePlanningProviderConfig(
   environment: PlanningEnvironment,
 ): PlanningProviderConfig {
-  const provider = environment.AI_PROVIDER?.trim() || "alibaba";
-  if (provider !== "alibaba") {
+  const provider = environment.AI_PROVIDER?.trim() || "deepseek";
+  if (provider !== "deepseek") {
     throw new PlanningConfigurationError(
       `Unsupported AI_PROVIDER: ${provider}.`,
     );
@@ -44,8 +44,9 @@ export function resolvePlanningProviderConfig(
     apiKey: required(environment, "AI_API_KEY"),
     baseUrl: required(environment, "AI_BASE_URL"),
     normalizerModel:
-      environment.AI_NORMALIZER_MODEL?.trim() || "qwen3.8-flash",
-    plannerModel: environment.AI_PLANNER_MODEL?.trim() || "qwen3.8-flash",
+      environment.AI_NORMALIZER_MODEL?.trim() || "deepseek-v4-flash",
+    plannerModel:
+      environment.AI_PLANNER_MODEL?.trim() || "deepseek-v4-flash",
   };
 }
 
@@ -53,7 +54,7 @@ export function createConfiguredPlanningProvider(
   environment: PlanningEnvironment = process.env,
 ): PlanningModelProvider {
   const config = resolvePlanningProviderConfig(environment);
-  const alibaba = createOpenAICompatible({
+  const deepseek = createOpenAICompatible({
     name: config.provider,
     apiKey: config.apiKey,
     baseURL: config.baseUrl,
@@ -61,7 +62,7 @@ export function createConfiguredPlanningProvider(
   });
 
   return {
-    participantNormalizerModel: () => alibaba(config.normalizerModel),
-    groupPlannerModel: () => alibaba(config.plannerModel),
+    participantNormalizerModel: () => deepseek(config.normalizerModel),
+    groupPlannerModel: () => deepseek(config.plannerModel),
   };
 }

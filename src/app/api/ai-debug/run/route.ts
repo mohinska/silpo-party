@@ -42,12 +42,12 @@ export async function POST() {
         at: new Date(startedAt).toISOString(),
         elapsedMs: 0,
         data: {
-          provider: process.env.AI_PROVIDER?.trim() || "alibaba",
+          provider: process.env.AI_PROVIDER?.trim() || "deepseek",
           baseUrl: process.env.AI_BASE_URL?.trim() || "not configured",
           normalizerModel:
-            process.env.AI_NORMALIZER_MODEL?.trim() || "qwen3.8-flash",
+            process.env.AI_NORMALIZER_MODEL?.trim() || "deepseek-v4-flash",
           plannerModel:
-            process.env.AI_PLANNER_MODEL?.trim() || "qwen3.8-flash",
+            process.env.AI_PLANNER_MODEL?.trim() || "deepseek-v4-flash",
           eventId: input.event.id,
           participantId: user.id,
         },
