@@ -338,7 +338,11 @@ function verifiedCatalogProducts(data: unknown, context: CartContext): SilpoVeri
 }
 
 /** Host-scoped read operations only; legacy cart write exports remain separate. */
-export const withSilpoCatalogReader: HostCatalogAdapter = async (hostId, operation) => withSilpoMcp(hostId, async (client, advertised) => {
+export const withSilpoCatalogReader = async <T>(
+  hostId: string,
+  operation: (reader: SilpoCatalogReader) => Promise<T>,
+  beforeRead?: () => void,
+): Promise<T> => withSilpoMcp(hostId, async (client, advertised) => {
   const tools = new Map([...advertised].slice(0, 200).filter(([, tool]) => {
     if (tool.annotations?.readOnlyHint === false || tool.annotations?.destructiveHint === true) return false;
     if (/(?:^|_)(add|remove|delete|update|set|create|checkout|submit|cancel|write)(?:_|$)/i.test(tool.name)) return false;
@@ -353,6 +357,7 @@ export const withSilpoCatalogReader: HostCatalogAdapter = async (hostId, operati
   const readClient = {
     callTool: async (...args: Parameters<Client["callTool"]>) => {
       try {
+        beforeRead?.();
         const result = await client.callTool(...args);
         if (result.isError) throw new Error("MCP read failed");
         const envelope = objectValue(result);
