@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { requireUser } from "@/lib/auth";
+import { PendingButton } from "@/components/pending-button";
 import { createDebugParty, joinDebugParty } from "./actions";
 import styles from "./page.module.css";
 
@@ -15,6 +16,7 @@ export default async function AiDebugPage() {
         <div className={styles.titleRow}>
           <div className={styles.pulse} aria-hidden="true" />
           <div>
+            <span className={styles.brand}>AI Debug Party</span>
             <h1>Спільний кошик</h1>
             <p>
               Створіть вечірку, запросіть друзів і напишіть у чаті, чого хочеться.
@@ -29,13 +31,13 @@ export default async function AiDebugPage() {
           <h2>Нова вечірка</h2>
           <p><label htmlFor="budget">Бюджет, грн · необов’язково</label></p>
           <input id="budget" name="budget" type="number" min="0" step="0.01" placeholder="Без обмеження" />
-          <button type="submit">Створити вечірку</button>
+          <PendingButton pendingLabel="Створюємо…">Створити вечірку</PendingButton>
         </form>
         <form action={joinDebugParty}>
           <h2>Маєте запрошення?</h2>
           <p><label htmlFor="code">Код вечірки · 8 символів</label></p>
           <input id="code" name="code" required minLength={8} maxLength={8} pattern="[A-Za-z0-9]{8}" autoCapitalize="characters" autoComplete="off" />
-          <button type="submit">Приєднатися</button>
+          <PendingButton pendingLabel="Приєднуємося…">Приєднатися</PendingButton>
         </form>
       </section>
     </main>

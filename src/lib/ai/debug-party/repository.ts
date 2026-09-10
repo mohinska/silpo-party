@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { mapWorkspaceRun, mapWorkspaceToolEvent, mapWorkspaceSnapshot, SendStatusSchema } from "./workspace-view";
 
 import {
   DebugCartItemSchema,
@@ -121,6 +122,11 @@ export type DebugPartyWorkspace = {
   contexts: DebugParticipantContext[];
   cartItems: DebugCartItem[];
   chatMessages?: DebugChatMessage[];
+  cartStale?: boolean;
+  runs?: ReturnType<typeof mapWorkspaceRun>[];
+  toolEvents?: ReturnType<typeof mapWorkspaceToolEvent>[];
+  snapshot?: ReturnType<typeof mapWorkspaceSnapshot>;
+  sendStatus?: z.infer<typeof SendStatusSchema> | null;
 };
 
 export type DebugPartyWorkspaceRow = {
@@ -130,6 +136,10 @@ export type DebugPartyWorkspaceRow = {
   contexts: unknown[];
   cartItems: unknown[];
   chatMessages?: unknown[];
+  runs?: unknown[];
+  toolEvents?: unknown[];
+  snapshot?: unknown;
+  sendStatus?: unknown;
 };
 
 type RunInsert = {
@@ -366,6 +376,11 @@ export class DebugPartyRepository {
       contexts: workspace.contexts.map(mapContext),
       cartItems: workspace.cartItems.map(mapCartItem),
       chatMessages: (workspace.chatMessages ?? []).map(mapMessage),
+      cartStale: z.boolean().parse(object(workspace.party, "Party").cart_stale ?? false),
+      runs: (workspace.runs ?? []).map(mapWorkspaceRun),
+      toolEvents: (workspace.toolEvents ?? []).map(mapWorkspaceToolEvent),
+      snapshot: mapWorkspaceSnapshot(workspace.snapshot),
+      sendStatus: SendStatusSchema.nullable().parse(workspace.sendStatus ?? null),
     };
   }
 
@@ -507,19 +522,31 @@ export async function createDebugPartyRepository(): Promise<DebugPartyRepository
       if (!party) return null;
 
       const partyId = String(party.id);
-      const [membersResult, intentsResult, contextsResult, cartItemsResult, messagesResult] = await Promise.all([
+      const [membersResult, intentsResult, contextsResult, cartItemsResult, messagesResult, runsResult, eventsResult, snapshotResult, sendResult] = await Promise.all([
         authenticated.from("debug_party_members").select("party_id, participant_id, role, context_status, joined_at, updated_at").eq("party_id", partyId),
         authenticated.from("debug_food_intents").select("id, party_id, participant_id, request, revision, created_at, updated_at").eq("party_id", partyId),
         authenticated.from("debug_participant_contexts").select("id, party_id, participant_id, intent_revision, context_status, purchase_history_status, dietary_restrictions, favorites, recent_products, summary, collected_at, created_at, updated_at").eq("party_id", partyId),
         authenticated.from("debug_cart_items").select("id, party_id, product_id, company_id, branch_id, name, quantity, unit, unit_price_cents, discount_cents, image_url, evidence_id, observed_at, introduced_revision, created_at, updated_at").eq("party_id", partyId),
         authenticated.from("debug_chat_messages").select("id, party_id, participant_id, role, content, status, created_at, updated_at").eq("party_id", partyId).order("created_at", { ascending: false }).order("id", { ascending: false }).limit(200),
+        authenticated.from("debug_agent_runs").select("id, actor_id, mode, status, created_at").eq("party_id", partyId).order("created_at", { ascending: false }).limit(50),
+        authenticated.from("debug_tool_events").select("id, run_id, tool_name, status, duration_ms, metadata, created_at").eq("party_id", partyId).order("created_at", { ascending: false }).limit(100),
+        authenticated.from("debug_cart_snapshots").select("id, party_id, cart_revision, total_cents, finalized_at").eq("party_id", partyId).maybeSingle(),
+        authenticated.from("debug_send_runs").select("status").eq("party_id", partyId).order("created_at", { ascending: false }).limit(1).maybeSingle(),
       ]);
-      for (const result of [membersResult, intentsResult, contextsResult, cartItemsResult, messagesResult]) {
+      for (const result of [membersResult, intentsResult, contextsResult, cartItemsResult, messagesResult, runsResult, eventsResult, snapshotResult, sendResult]) {
         if (result.error) throw result.error;
       }
       const members = membersResult.data ?? [];
       if (!members.some((member) => member.participant_id === actorId)) return null;
-      return { party, members, intents: intentsResult.data ?? [], contexts: contextsResult.data ?? [], cartItems: cartItemsResult.data ?? [], chatMessages: [...(messagesResult.data ?? [])].reverse() };
+      let snapshot = null;
+      if (snapshotResult.data) {
+        const items = await authenticated.from("debug_cart_snapshot_items").select("id, snapshot_id, product_id, company_id, branch_id, name, quantity, unit, unit_price_cents, discount_cents, image_url, evidence_id, observed_at, created_at").eq("snapshot_id", snapshotResult.data.id);
+        if (items.error) throw items.error;
+        snapshot = { ...snapshotResult.data, items: items.data ?? [] };
+      }
+      return { party, members, intents: intentsResult.data ?? [], contexts: contextsResult.data ?? [], cartItems: cartItemsResult.data ?? [],
+        chatMessages: [...(messagesResult.data ?? [])].reverse(), runs: runsResult.data ?? [],
+        toolEvents: [...(eventsResult.data ?? [])].reverse(), snapshot, sendStatus: sendResult.data?.status ?? null };
     },
 
     async findMembership(partyId, participantId) {

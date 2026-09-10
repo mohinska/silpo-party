@@ -59,6 +59,33 @@ function port(overrides: Partial<DebugPartyPersistencePort> = {}): DebugPartyPer
 }
 
 describe("DebugPartyRepository", () => {
+  it("projects stale state and bounded run/tool metadata without raw outputs", async () => {
+    const repository = new DebugPartyRepository(port({ findWorkspace: async () => ({
+      party: { ...party, cart_stale: true }, members: [hostMember], intents: [], contexts: [], cartItems: [],
+      runs: [{ id: "run-1", actor_id: "user-host", mode: "chat", status: "running", created_at: now, error: "secret error", prompt: "secret prompt" }],
+      toolEvents: [{ id: "event-1", run_id: "run-1", tool_name: "searchProducts", status: "completed", duration_ms: 10, created_at: now,
+        metadata: { count: 3, token: "secret" }, output: "secret output" }],
+    }) }));
+    const workspace = await repository.loadWorkspace("ABCDEFGH", "user-host");
+    expect(workspace.cartStale).toBe(true);
+    expect(workspace.runs).toEqual([{ id: "run-1", actorId: "user-host", mode: "chat", status: "running", createdAt: now }]);
+    expect(workspace.toolEvents).toEqual([{ id: "event-1", runId: "run-1", toolName: "searchProducts", status: "completed", durationMs: 10, createdAt: now, count: 3 }]);
+    expect(JSON.stringify(workspace)).not.toContain("secret");
+  });
+
+  it("returns the frozen snapshot independently of live cart rows", async () => {
+    const repository = new DebugPartyRepository(port({ findWorkspace: async () => ({
+      party: { ...party, status: "finalized" }, members: [hostMember], intents: [], contexts: [], cartItems: [],
+      snapshot: { id: "snapshot", party_id: "party-1", cart_revision: 4, total_cents: 1250, finalized_at: now,
+        items: [{ id: "frozen-item", snapshot_id: "snapshot", product_id: "product", company_id: "company", branch_id: "branch", name: "Вода", quantity: 1, unit: "шт", unit_price_cents: 1250, discount_cents: null, image_url: null, evidence_id: "evidence", observed_at: now, created_at: now }] },
+      sendStatus: "partial",
+    }) }));
+    const workspace = await repository.loadWorkspace("ABCDEFGH", "user-host");
+    expect(workspace.snapshot).toMatchObject({ id: "snapshot", totalCents: 1250, items: [{ name: "Вода" }] });
+    expect(workspace.cartItems).toEqual([]);
+    expect(workspace.sendStatus).toBe("partial");
+  });
+
   it("authorizes chat against membership and derives attribution from the actor", async () => {
     const inserted: unknown[] = [];
     const repository = new DebugPartyRepository(port({ insertMessage: async (input) => {
