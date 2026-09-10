@@ -2,9 +2,12 @@ import Link from "next/link";
 import { headers } from "next/headers";
 import {
   addItem,
+  confirmAiProposal,
   deleteItem,
   finalizeParty,
+  rejectAiProposal,
   reopenParty,
+  runAiMealPlanner,
   saveBudget,
   saveIntent,
   setItemShares,
@@ -21,6 +24,7 @@ import {
   lineTotalCents,
 } from "@/lib/parties";
 import { getConnectionStatus } from "@/lib/silpo/oauth";
+import { latestMealProposal } from "@/lib/ai/planning/proposals";
 
 export default async function PartyPage({ params }: PageProps<"/party/[code]">) {
   const { code } = await params;
@@ -55,6 +59,39 @@ export default async function PartyPage({ params }: PageProps<"/party/[code]">) 
     ? party.silpo_checkout_url
     : null;
   const ownIntent = intents.find((intent) => intent.user_id === user.id);
+  const proposal = await latestMealProposal(party.id);
+
+  const agentProposal = (
+    <section className="agent-proposal">
+      <header>
+        <h3>AI-пропозиція меню</h3>
+        <p className="muted">Кошик не змінюється, доки Організатор явно не підтвердить пропозицію.</p>
+      </header>
+      {!proposal ? (
+        isHost ? (
+          <form action={runAiMealPlanner.bind(null, party.code)}>
+            <PendingButton className="primary-button" disabled={!party.budget_cents || intents.length !== members.length || !hostConnected} pendingLabel="Плануємо…">Запустити агента</PendingButton>
+          </form>
+        ) : <p className="empty-state">Організатор ще не запускав планування.</p>
+      ) : (
+        <div className="proposal-sections">
+          <div className="proposal-status"><strong>{formatMoney(proposal.estimatedTotalCents)}</strong><span className={`status-pill ${proposal.budgetStatus === "over" ? "error" : proposal.budgetStatus === "within" ? "synced" : "pending"}`}>{proposal.budgetStatus === "within" ? "У межах бюджету" : proposal.budgetStatus === "over" ? "Понад бюджет" : "Потрібне уточнення"}</span></div>
+          <section><h4>Страви</h4>{proposal.dishes.map((dish) => <article key={dish.id}><strong>{dish.name}</strong><small>{dish.servings} порц. · {dish.readyMeal ? "готова страва Сільпо" : "готуємо"}</small></article>)}</section>
+          <section><h4>Рецепти та джерела</h4>{proposal.recipes.map((recipe) => <article key={recipe.id}><a href={recipe.source.url} target="_blank" rel="noreferrer">{recipe.title} ↗</a><small>{recipe.source.provider === "silpo" ? "Рецепт Сільпо" : "Наданий рецепт"} · масштабовано до {recipe.baseServings} порц.</small></article>)}</section>
+          <section><h4>Об’єднані інгредієнти</h4>{proposal.mergedIngredients.map((item) => <article key={item.key}><span>{item.name}{item.variant !== "standard" ? ` · ${item.variant}` : ""}</span><strong>{item.quantity} {item.unit}</strong></article>)}</section>
+          <section><h4>Товари Сільпо</h4>{proposal.productLines.map((line) => <article key={`${line.productId}:${line.companyId}:${line.branchId}`}><span>{line.name}<small>{line.productId}</small></span><strong>{line.packageCount} × {formatMoney(line.unitPriceCents)}</strong></article>)}</section>
+          {proposal.unresolved.length > 0 && <div className="notice error">{proposal.unresolved.map((item) => <p key={item.requirementKey}>{item.reason}</p>)}</div>}
+          {proposal.alternatives.length > 0 && <div className="notice">{proposal.alternatives.map((item) => <p key={item.description}>{item.description}</p>)}</div>}
+          {proposal.error && <p className="notice error">{proposal.error}</p>}
+          {isHost && isOpen && ["pending", "failed"].includes(proposal.status) && <div className="proposal-actions">
+            <form action={runAiMealPlanner.bind(null, party.code)}><PendingButton className="secondary-button" pendingLabel="Повторюємо…">Повторити пошук</PendingButton></form>
+            <form action={rejectAiProposal.bind(null, party.code, proposal.id)}><PendingButton className="text-button" pendingLabel="Відхиляємо…">Відхилити</PendingButton></form>
+            <form action={confirmAiProposal.bind(null, party.code, proposal.id)}><PendingButton className="primary-button" disabled={proposal.budgetStatus !== "within" || proposal.unresolved.length > 0} pendingLabel="Синхронізуємо…">Підтвердити й додати</PendingButton></form>
+          </div>}
+        </div>
+      )}
+    </section>
+  );
 
   const guestsStage = (
     <div className="stage-stack">
@@ -440,7 +477,7 @@ export default async function PartyPage({ params }: PageProps<"/party/[code]">) 
         </section>
       </div>
 
-      <ShoppingTabs basket={basket} />
+      <ShoppingTabs basket={basket} agent={agentProposal} />
     </div>
   );
 

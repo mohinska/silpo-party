@@ -99,6 +99,13 @@ export function assertEventPlanSafety(
     }
   }
 
+  for (const participant of (plan.status === "ready" ? input.participants : []).filter(({ foodIntent }) => foodIntent.kind !== "none")) {
+    const requested = plan.dishes.filter((dish) => dish.requestedByParticipantIds?.includes(participant.id));
+    if (requested.length !== 1 || requested[0]?.requestedByParticipantIds?.length !== 1) {
+      issues.push({ code: "dish_intent", message: `Explicit request from ${participant.id} must remain one separate dish.`, participantId: participant.id });
+    }
+  }
+
   for (const conflict of plan.conflicts) {
     for (const participantId of conflict.participantIds) {
       if (!participantIds.has(participantId)) {

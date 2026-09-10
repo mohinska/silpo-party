@@ -53,6 +53,8 @@ export type BasketItem = {
   silpo_image_url: string | null;
   silpo_sync_status: "pending" | "synced" | "error";
   silpo_sync_error: string | null;
+  source: "manual" | "ai";
+  ai_proposal_id: string | null;
 };
 
 export type ItemShare = { item_id: string; user_id: string };
@@ -100,7 +102,7 @@ export async function getPartyWorkspace(code: string) {
   const [membersResult, intentsResult, itemsResult] = await Promise.all([
     supabase.from("party_members").select("party_id, user_id, role, display_name, email, avatar_url").eq("party_id", party.id).order("joined_at"),
     supabase.from("food_intents").select("party_id, user_id, dish_name, description, content_url, indifferent").eq("party_id", party.id),
-    supabase.from("basket_items").select("id, party_id, name, quantity, unit, unit_price_cents, added_by, silpo_product_id, silpo_company_id, silpo_branch_id, silpo_product_slug, silpo_image_url, silpo_sync_status, silpo_sync_error").eq("party_id", party.id).order("created_at"),
+    supabase.from("basket_items").select("id, party_id, name, quantity, unit, unit_price_cents, added_by, silpo_product_id, silpo_company_id, silpo_branch_id, silpo_product_slug, silpo_image_url, silpo_sync_status, silpo_sync_error, source, ai_proposal_id").eq("party_id", party.id).order("created_at"),
   ]);
   if (membersResult.error) throw membersResult.error;
   if (intentsResult.error) throw intentsResult.error;

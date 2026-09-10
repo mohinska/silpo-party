@@ -13,7 +13,8 @@ For a complete localhost setup and multi-account testing walkthrough, see
    `supabase/migrations/202609080001_auth_profiles_silpo_oauth.sql`, then
    `supabase/migrations/202609090001_party_prototype.sql`, then
    `supabase/migrations/202609090002_silpo_cart_sync.sql`, then
-   `supabase/migrations/202609090003_fix_party_code_generation.sql`.
+   `supabase/migrations/202609090003_fix_party_code_generation.sql`, then
+   `supabase/migrations/202609100001_ai_meal_proposals.sql`.
 2. In Supabase Authentication, enable Google and configure the Google client ID and
    secret. Add `http://localhost:3000/auth/callback` (and the production equivalent)
    to the Supabase redirect allow-list. Google's authorized redirect URI is the

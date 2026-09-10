@@ -86,7 +86,7 @@ export function PartyStages({
   );
 }
 
-export function ShoppingTabs({ basket }: { basket: ReactNode }) {
+export function ShoppingTabs({ basket, agent }: { basket: ReactNode; agent: ReactNode }) {
   const [activeTab, setActiveTab] = useState<"basket" | "agent">("basket");
 
   return (
@@ -116,6 +116,7 @@ export function ShoppingTabs({ basket }: { basket: ReactNode }) {
         <div role="tabpanel">{basket}</div>
       ) : (
         <div className="agent-chat-placeholder" role="tabpanel">
+          {agent}
           <div className="agent-orbit" aria-hidden="true">СФ</div>
           <div>
             <h3>Агент приєднається на наступному етапі</h3>

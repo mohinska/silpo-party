@@ -5,6 +5,8 @@ import { redirect } from "next/navigation";
 import { requireUser } from "@/lib/auth";
 import { removePartyItemFromSilpo, syncPartyBasketToSilpo } from "@/lib/silpo/cart";
 import { createClient } from "@/lib/supabase/server";
+import { applyMealProposal, createMealProposal, rejectMealProposal } from "@/lib/ai/planning/proposals";
+import { getPartyWorkspace } from "@/lib/parties";
 
 function clean(value: FormDataEntryValue | null, max: number) {
   return String(value ?? "").trim().slice(0, max);
@@ -212,5 +214,27 @@ export async function reopenParty(code: string) {
     updated_at: new Date().toISOString(),
   }).eq("id", party.id);
   if (error) throw error;
+  revalidatePath(`/party/${party.code}`);
+}
+
+export async function runAiMealPlanner(code: string) {
+  const workspace = await getPartyWorkspace(code);
+  if (workspace.party.host_id !== workspace.user.id) throw new Error("Only the Host may run AI meal planning.");
+  if (workspace.party.status !== "collecting") throw new Error("Reopen the party before planning.");
+  if (!workspace.party.budget_cents) throw new Error("Set the shared budget first.");
+  if (workspace.members.some((member) => !workspace.intents.some((intent) => intent.user_id === member.user_id))) throw new Error("Every participant must submit a dish or explicitly choose ‘I don’t care’.");
+  await createMealProposal(workspace);
+  revalidatePath(`/party/${workspace.party.code}`);
+}
+
+export async function confirmAiProposal(code: string, proposalId: string) {
+  const { user, party } = await partyForMember(code);
+  await applyMealProposal({ proposalId, party: party as Parameters<typeof applyMealProposal>[0]["party"], actorId: user.id });
+  revalidatePath(`/party/${party.code}`);
+}
+
+export async function rejectAiProposal(code: string, proposalId: string) {
+  const { user, party } = await partyForMember(code);
+  await rejectMealProposal({ proposalId, party: party as Parameters<typeof rejectMealProposal>[0]["party"], actorId: user.id });
   revalidatePath(`/party/${party.code}`);
 }

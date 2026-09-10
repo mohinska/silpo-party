@@ -8,7 +8,8 @@ export type PlanningSafetyIssue = {
     | "missing_context"
     | "missing_check"
     | "unsafe_check"
-    | "constraint_mismatch";
+    | "constraint_mismatch"
+    | "dish_intent";
   message: string;
   participantId?: string;
   dishId?: string;

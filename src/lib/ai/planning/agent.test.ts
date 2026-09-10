@@ -48,6 +48,7 @@ const safePlan: EventPlan = {
     {
       id: "dish-1",
       name: "Овочеве рагу",
+      requestedByParticipantIds: ["p1"],
       eaterParticipantIds: ["p1"],
       servings: 1,
       ingredients: [{ name: "Кабачок" }],
@@ -478,16 +479,15 @@ describe("planEvent", () => {
           preferences: [],
           summary: "Контекст перевірено.",
         })),
-        dishes: [
-          {
-            id: "dish-1",
-            name: "Спільна страва",
-            eaterParticipantIds: participants.map(({ id }) => id),
-            servings: 5,
-            ingredients: [{ name: "Овочі" }],
-            reasoningSummary: "Підходить усім.",
-          },
-        ],
+        dishes: participants.map(({ id }, index) => ({
+          id: `dish-${index + 1}`,
+          name: "Спільна страва",
+          requestedByParticipantIds: [id],
+          eaterParticipantIds: [id],
+          servings: 1,
+          ingredients: [{ name: "Овочі" }],
+          reasoningSummary: "Підходить учаснику.",
+        })),
         conflicts: [],
         proposedResolutions: [],
         hardConstraintChecks: [],
