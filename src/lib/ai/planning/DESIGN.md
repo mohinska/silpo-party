@@ -85,6 +85,13 @@ AI_NORMALIZER_MODEL=deepseek-v4-flash
 AI_PLANNER_MODEL=deepseek-v4-flash
 ```
 
+DeepSeek requests use Chat Completions JSON-object mode
+(`response_format: { "type": "json_object" }`), not native JSON Schema mode.
+The expected Zod-derived JSON Schema is included in the model instructions;
+the returned JSON is parsed and validated with the existing Zod schema. A
+parse or validation failure receives one correction attempt, with Zod issues
+included when validation failed. The retry is validated identically.
+
 Tests inject generation adapters or a model provider and require no network or
 credentials.
 

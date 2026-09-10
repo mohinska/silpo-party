@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { planEvent } from "./agent";
 import { PlanningProviderError, PlanningSafetyError } from "./errors";
 import type { PlanningDebugEvent } from "./debug-stream";
+import { createConfiguredPlanningProvider } from "./provider";
 import type { EventPlan, GroupPlanningInput } from "./schemas";
 
 const validInput = {
@@ -69,6 +70,97 @@ const safePlan: EventPlan = {
 };
 
 describe("planEvent", () => {
+  it("uses DeepSeek JSON-object mode and retries one schema-invalid plan", async () => {
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+
+    vi.stubGlobal(
+      "fetch",
+      async (input: string | URL | Request, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        requests.push({ url: String(input), body });
+        const content = requests.length === 1 ? { status: "ready" } : safePlan;
+
+        return new Response(
+          JSON.stringify({
+            id: `completion-${requests.length}`,
+            object: "chat.completion",
+            created: 1,
+            model: "deepseek-v4-flash",
+            choices: [
+              {
+                index: 0,
+                message: {
+                  role: "assistant",
+                  content: JSON.stringify(content),
+                },
+                finish_reason: "stop",
+              },
+            ],
+            usage: {
+              prompt_tokens: 10,
+              completion_tokens: 10,
+              total_tokens: 20,
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    );
+
+    try {
+      const result = await planEvent(validInput, {
+        loadParticipantContext: async () => ({ status: "available", data: {} }),
+        modelProvider: createConfiguredPlanningProvider({
+          AI_PROVIDER: "deepseek",
+          AI_API_KEY: "test-key",
+          AI_BASE_URL: "https://api.deepseek.com",
+          AI_NORMALIZER_MODEL: "deepseek-v4-flash",
+          AI_PLANNER_MODEL: "deepseek-v4-flash",
+        }),
+      });
+
+      expect(result.plan).toEqual(safePlan);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+
+    expect(requests).toHaveLength(2);
+    expect(requests.map(({ url }) => url)).toEqual([
+      "https://api.deepseek.com/chat/completions",
+      "https://api.deepseek.com/chat/completions",
+    ]);
+    expect(
+      requests.map(({ body }) => ({
+        model: body.model,
+        response_format: body.response_format,
+      })),
+    ).toEqual([
+      {
+        model: "deepseek-v4-flash",
+        response_format: { type: "json_object" },
+      },
+      {
+        model: "deepseek-v4-flash",
+        response_format: { type: "json_object" },
+      },
+    ]);
+    const firstMessages = requests[0].body.messages as Array<{
+      content: string;
+    }>;
+    const retryMessages = requests[1].body.messages as Array<{
+      content: string;
+    }>;
+    expect(firstMessages.map(({ content }) => content).join("\n")).toContain(
+      '"hardConstraintChecks"',
+    );
+    expect(retryMessages.map(({ content }) => content).join("\n")).toContain(
+      '"participantInsights"',
+    );
+    expect(retryMessages.map(({ content }) => content).join("\n")).toContain(
+      '"path"',
+    );
+  });
+
   it("emits inspectable stages in execution order", async () => {
     const events: PlanningDebugEvent[] = [];
 

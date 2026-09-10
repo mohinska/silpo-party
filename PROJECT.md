@@ -1,6 +1,6 @@
 # Silpo Family
 
-Last updated: 2026-09-09
+Last updated: 2026-09-10
 Status: No-AI multi-user party prototype implemented with Google/Supabase auth and
 real Host-cart synchronization through Silpo MCP.
 
@@ -471,6 +471,10 @@ confirmed sections prevail over superseded interpretations.
   Alibaba/Qwen to DeepSeek. Normalization and group planning remain independently
   configurable and default to the cost-efficient `deepseek-v4-flash`; the provider
   abstraction, agent contracts and strict Zod schemas are unchanged.
+- 2026-09-10: DeepSeek planning uses Chat Completions JSON-object mode rather than
+  unsupported native JSON Schema response formatting. Zod-derived schemas are sent
+  as explicit JSON instructions, responses retain strict Zod validation, and one
+  validation-aware correction attempt is allowed without changing agent contracts.
 
 ## Contradictions resolved and ambiguity retained
 
