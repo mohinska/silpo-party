@@ -1,80 +1,64 @@
 "use server";
 
+import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
+import { z } from "zod";
 import { requireUser } from "@/lib/auth";
-import {
-  createSingleParticipantDebugInput,
-  serializeDebugError,
-  type SerializedDebugError,
-} from "@/lib/ai/planning/debug";
-import { planEvent, type PlanningResult } from "@/lib/ai/planning";
-import type { EventPlanningInput } from "@/lib/ai/planning/schemas";
-import { getPersonalSilpoContext } from "@/lib/silpo/mcp";
+import { createDebugPartyApplication } from "@/lib/ai/debug-party/application";
+import { DebugCodeSchema, DebugBudgetSchema } from "./form-schemas";
 
-type DebugTrace = PlanningResult["contextTrace"];
+const PartyFormSchema = z.object({ code: DebugCodeSchema });
 
-export type DebugPlanningState =
-  | { status: "idle" }
-  | {
-      status: "success";
-      input: EventPlanningInput;
-      result: PlanningResult;
-    }
-  | {
-      status: "error";
-      error: SerializedDebugError;
-      contextTrace: DebugTrace;
-    };
-
-export async function runDebugPlanning(
-  _previousState: DebugPlanningState,
-  _formData: FormData,
-): Promise<DebugPlanningState> {
-  void _previousState;
-  void _formData;
-
+export async function createDebugParty(formData: FormData) {
   const user = await requireUser();
-  const displayName =
-    user.user_metadata.full_name ??
-    user.user_metadata.name ??
-    user.email ??
-    "Користувач";
-  const input = createSingleParticipantDebugInput({
-    userId: user.id,
-    displayName,
-  });
-  const contextTrace: DebugTrace = [];
+  const budgetCents = DebugBudgetSchema.parse(formData.get("budget"));
+  const code = await (await createDebugPartyApplication()).createParty(user.id, budgetCents);
+  redirect(`/ai-debug/party/${code}`);
+}
 
-  try {
-    const result = await planEvent(input, {
-      loadParticipantContext: async (participantId) => {
-        if (participantId !== user.id) {
-          throw new Error("Debug context access is limited to the current user.");
-        }
+export async function joinDebugParty(formData: FormData) {
+  const user = await requireUser();
+  const { code } = PartyFormSchema.parse(Object.fromEntries(formData));
+  const joinedCode = await (await createDebugPartyApplication()).joinParty(code, user.id);
+  redirect(`/ai-debug/party/${joinedCode}`);
+}
 
-        const context = await getPersonalSilpoContext(user.id);
-        if (!context) {
-          const unavailable = {
-            participantId,
-            status: "unavailable" as const,
-            reason: "Silpo account is not connected or context is unavailable.",
-          };
-          contextTrace.push(unavailable);
-          return {
-            status: unavailable.status,
-            reason: unavailable.reason,
-          };
-        }
+export async function saveDebugBudget(formData: FormData) {
+  const user = await requireUser();
+  const { code, budget } = PartyFormSchema.extend({ budget: DebugBudgetSchema }).parse(Object.fromEntries(formData));
+  await (await createDebugPartyApplication()).saveBudget(code, user.id, budget);
+  revalidatePath(`/ai-debug/party/${code}`);
+}
 
-        return { status: "available", data: context };
-      },
-    });
+export async function sendDebugMessage(formData: FormData) {
+  const user = await requireUser();
+  const { code, content } = PartyFormSchema.extend({ content: z.string().trim().min(1).max(2000) }).parse(Object.fromEntries(formData));
+  const result = await (await createDebugPartyApplication()).sendMessage(code, user.id, content);
+  revalidatePath(`/ai-debug/party/${code}`);
+  return result;
+}
 
-    return { status: "success", input, result };
-  } catch (error) {
-    return {
-      status: "error",
-      error: serializeDebugError(error),
-      contextTrace,
-    };
-  }
+export async function buildDebugBasket(formData: FormData) {
+  const user = await requireUser();
+  const { code } = PartyFormSchema.parse(Object.fromEntries(formData));
+  const result = await (await createDebugPartyApplication()).buildBasket(code, user.id);
+  revalidatePath(`/ai-debug/party/${code}`);
+  return result;
+}
+
+export async function finalizeDebugParty(formData: FormData) {
+  const user = await requireUser();
+  const { code } = PartyFormSchema.parse(Object.fromEntries(formData));
+  await (await createDebugPartyApplication()).finalizeParty(code, user.id);
+  revalidatePath(`/ai-debug/party/${code}`);
+}
+
+export async function sendDebugCartToSilpo(formData: FormData) {
+  const user = await requireUser();
+  const { code, confirmChanges } = PartyFormSchema.extend({
+    confirmChanges: z.enum(["true", "false"]).optional().transform((value) => value === "true"),
+  }).parse(Object.fromEntries(formData));
+  const result = await (await createDebugPartyApplication()).sendCart(code, user.id, confirmChanges);
+  revalidatePath(`/ai-debug/party/${code}`);
+  return result;
 }

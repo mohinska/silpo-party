@@ -84,12 +84,13 @@ select pg_temp.assert_true((select revision = 2 from public.debug_food_intents),
 select pg_temp.expect_error('update public.debug_food_intents set revision = 99', '42501');
 insert into public.debug_chat_messages(party_id, participant_id, role, content)
   select s.id, u.id, 'user', 'Find cheaper cheese' from debug_test_state s, debug_test_users u where s.label = 'party' and u.n = 2;
+select pg_temp.assert_true((select revision = 3 and request = 'Find cheaper cheese' from public.debug_food_intents), 'chat atomically advances participant intent');
 select pg_temp.expect_error('insert into public.debug_chat_messages(party_id,participant_id,role,content) select s.id,u.id,''assistant'',''Forged'' from debug_test_state s,debug_test_users u where s.label=''party'' and u.n=2', '42501');
 select pg_temp.expect_error('insert into public.debug_product_evidence default values', '42501');
 
 select set_config('request.jwt.claim.sub', (select id::text from debug_test_users where n = 1), true);
 update public.debug_food_intents set request = 'Someone else';
-select pg_temp.assert_true((select request = 'Vegetable soup' from public.debug_food_intents), 'other member intent is not writable');
+select pg_temp.assert_true((select request = 'Find cheaper cheese' from public.debug_food_intents), 'other member intent is not writable');
 insert into public.debug_food_intents(party_id, participant_id, request)
   select s.id, u.id, 'Pasta' from debug_test_state s, debug_test_users u where s.label = 'party' and u.n = 1;
 select pg_temp.expect_error('select public.finalize_debug_party((select id from debug_test_state where label=''party''))', 'P0001', 'new build');
@@ -99,6 +100,8 @@ set local role service_role;
 insert into public.debug_agent_runs(party_id, actor_id, mode, status)
   select s.id, u.id, 'build', 'completed' from debug_test_state s, debug_test_users u where s.label = 'party' and u.n = 1;
 insert into debug_test_state(label, id) select 'run', id from public.debug_agent_runs;
+select pg_temp.expect_error('update public.debug_chat_messages set content = ''Rewritten''', 'P0001', 'immutable');
+select pg_temp.expect_error('insert into public.debug_participant_contexts(party_id,participant_id,intent_revision,context_status,purchase_history_status,summary,collected_at) select party_id,participant_id,revision+1,''ready'',''unavailable'',''Stale'',now() from public.debug_food_intents', 'P0001', 'revision');
 insert into public.debug_product_evidence(party_id, run_id, source, product_id, company_id, branch_id, name, unit, unit_price_cents, available, observed_at)
   select p.id, r.id, 'catalog_search', '123', 'company', 'branch', 'Cheese', 'kg', 1251, true, now()
   from debug_test_state p, debug_test_state r where p.label = 'party' and r.label = 'run';
@@ -127,14 +130,15 @@ set local role service_role;
 insert into public.debug_participant_contexts(party_id, participant_id, intent_revision, context_status, purchase_history_status, summary, collected_at)
   select party_id, participant_id, revision, 'ready', 'unavailable', 'Validated compact context', now() from public.debug_food_intents;
 update public.debug_party_members set context_status = 'ready';
--- A ready context for the wrong intent revision must still block finalization.
-update public.debug_participant_contexts set intent_revision = intent_revision + 1;
+-- A delayed personal result cannot overwrite current context.
+select pg_temp.expect_error('update public.debug_participant_contexts set intent_revision = intent_revision + 1', 'P0001', 'revision');
+update public.debug_party_members set context_status = 'pending';
 reset role;
 set local role authenticated;
 select pg_temp.expect_error('select public.finalize_debug_party((select id from debug_test_state where label=''party''))', 'P0001', 'contexts are stale');
 reset role;
 set local role service_role;
-update public.debug_participant_contexts set intent_revision = intent_revision - 1;
+update public.debug_party_members set context_status = 'ready';
 update public.debug_agent_runs set status = 'running';
 reset role;
 set local role authenticated;
@@ -224,4 +228,19 @@ end $$;
 reset role;
 set local role anon;
 select pg_temp.expect_error('select * from public.debug_parties', '42501');
+reset role;
+
+-- Successful incremental turns clear staleness without requiring silent members.
+set local role service_role;
+insert into public.debug_agent_runs(party_id,actor_id,mode,status)
+  select s.id,u.id,'chat','running' from debug_test_state s,debug_test_users u where s.label='capacity' and u.n=1;
+update public.debug_agent_runs set status='completed' where party_id=(select id from debug_test_state where label='capacity');
+select pg_temp.assert_true((select not cart_stale from public.debug_parties where id=(select id from debug_test_state where label='capacity')), 'successful chat clears stale state with silent members');
+-- A new intent during an active run must survive that run's completion.
+insert into public.debug_agent_runs(party_id,actor_id,mode,status)
+  select s.id,u.id,'chat','running' from debug_test_state s,debug_test_users u where s.label='capacity' and u.n=1;
+insert into public.debug_chat_messages(party_id,participant_id,role,content)
+  select s.id,u.id,'user','Add water' from debug_test_state s,debug_test_users u where s.label='capacity' and u.n=2;
+update public.debug_agent_runs set status='completed' where party_id=(select id from debug_test_state where label='capacity') and status='running';
+select pg_temp.assert_true((select cart_stale from public.debug_parties where id=(select id from debug_test_state where label='capacity')), 'new intent remains stale after older run');
 reset role;

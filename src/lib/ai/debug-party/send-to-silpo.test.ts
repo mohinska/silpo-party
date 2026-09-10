@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
 
-import { sendFrozenDebugCart } from "./send-to-silpo";
+import { sendFrozenDebugCart, type FrozenDebugCartAdapter, type FrozenDebugCartSendRepository } from "./send-to-silpo";
 
 const now = "2026-09-10T12:00:00.000Z";
 const hostId = "host";
@@ -29,7 +29,7 @@ function setup(overrides: {
   snapshot?: Record<string, unknown>;
   live?: Array<Record<string, unknown>>;
   cart?: Array<Record<string, unknown>>;
-  apply?: (host: string, lines: unknown[]) => Promise<Array<Record<string, unknown>>>;
+  apply?: FrozenDebugCartAdapter["applyLines"];
   priorRun?: Record<string, unknown> | null;
 } = {}) {
   const writes: Record<string, unknown>[] = [];
@@ -39,7 +39,7 @@ function setup(overrides: {
       snapshot: overrides.snapshot ?? snapshot(),
     })),
     findSendRun: vi.fn(async () => overrides.priorRun ?? null),
-    saveSendRun: vi.fn(async (run) => writes.push(run)),
+    saveSendRun: vi.fn(async (run: Parameters<FrozenDebugCartSendRepository["saveSendRun"]>[0]) => { writes.push(run); }),
     markPartySent: vi.fn(async () => undefined),
   };
   const cart = {
@@ -47,7 +47,7 @@ function setup(overrides: {
       productId: "milk", companyId: "company", branchId: "branch", available: true, unitPriceCents: 600,
     }]),
     readCart: vi.fn(async () => overrides.cart ?? []),
-    applyLines: vi.fn(overrides.apply ?? (async (_host, lines) => lines.map((line) => ({ itemId: (line as { id: string }).id, status: "applied" })))),
+    applyLines: vi.fn<FrozenDebugCartAdapter["applyLines"]>(overrides.apply ?? (async (_host, lines) => lines.map((line) => ({ itemId: line.id, status: "applied" })))),
   };
   return { repository, cart, writes };
 }

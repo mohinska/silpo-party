@@ -30,6 +30,14 @@ function adapter(entries: Array<[AdvertisedPersonalTool, unknown]>) {
 }
 
 describe("collectPersonalContext", () => {
+  it("passes cumulative participant messages to normalization for amendments", async () => {
+    const received: string[][] = [];
+    const result = await collectPersonalContext({ userId: "user-1", foodRequest: { ...foodRequest, request: "Забери гриби" },
+      participantMessages: ["Хочу піцу з грибами і воду", "Забери гриби"], callBudget: 0, mcpAdapter: adapter([]).mcpAdapter,
+      normalizer: async ({ signals }) => { received.push(signals.participantMessages); return { summary: "Піца без грибів і вода", dietaryRestrictions: [], favorites: [] }; } });
+    expect(received).toEqual([["Хочу піцу з грибами і воду", "Забери гриби"]]);
+    expect(result.summary).toBe("Піца без грибів і вода");
+  });
   it("collects advertised food capabilities, keeps the newest five purchases, and exposes no contact data", async () => {
     const fake = adapter([
       [tool("account_food", "Read my profile"), { allergies: ["Peanuts"], phone: "+380123", address: "private street", name: "Private Person", access_token: "secret-token" }],

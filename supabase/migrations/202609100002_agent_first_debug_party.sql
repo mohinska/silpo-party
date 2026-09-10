@@ -11,7 +11,7 @@ create table public.debug_parties (
   budget_cents bigint check (budget_cents >= 0),
   status text not null default 'collecting' check (status in ('collecting', 'ready', 'running', 'finalized', 'sent')),
   cart_revision bigint not null default 0 check (cart_revision >= 0),
-  -- Cleared by the server only after a successful build for current membership/intents.
+  -- Cleared by the server after a successful chat/build for current membership/intents.
   cart_stale boolean not null default true,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -35,7 +35,8 @@ create table public.debug_food_intents (
   id uuid primary key default gen_random_uuid(),
   party_id uuid not null references public.debug_parties(id) on delete cascade,
   participant_id uuid not null references auth.users(id) on delete restrict,
-  request text not null check (char_length(btrim(request)) between 1 and 500),
+  -- Latest event; immutable participant chat history supplies cumulative intent.
+  request text not null check (char_length(btrim(request)) between 1 and 2000),
   revision bigint not null default 1 check (revision > 0),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
@@ -89,6 +90,7 @@ create table public.debug_agent_runs (
   status text not null default 'queued' check (status in ('queued', 'running', 'completed', 'failed')),
   message_id uuid,
   intent_revision bigint check (intent_revision > 0),
+  planning_inputs jsonb not null default '{}'::jsonb,
   model text check (char_length(model) between 1 and 200),
   max_steps integer check (max_steps between 1 and 100),
   error text check (char_length(error) <= 500),
@@ -274,6 +276,17 @@ declare party_status text;
 begin
   select status into party_status from public.debug_parties where id = new.party_id for update;
   if party_status in ('finalized', 'sent') then raise exception 'Party is finalized'; end if;
+  if tg_table_name = 'debug_chat_messages' then
+    if tg_op = 'UPDATE' and (new.id <> old.id or new.party_id <> old.party_id or new.participant_id is distinct from old.participant_id
+      or new.role <> old.role or new.content <> old.content or new.created_at <> old.created_at) then
+      raise exception 'Chat history is immutable';
+    end if;
+    if tg_op = 'INSERT' and new.role = 'user' then
+      insert into public.debug_food_intents(party_id, participant_id, request)
+        values (new.party_id, new.participant_id, new.content)
+        on conflict (party_id, participant_id) do update set request = excluded.request;
+    end if;
+  end if;
   if tg_table_name = 'debug_food_intents' then
     if tg_op = 'UPDATE' then
       if new.id <> old.id or new.party_id <> old.party_id or new.participant_id <> old.participant_id then raise exception 'Intent attribution is immutable'; end if;
@@ -294,6 +307,78 @@ create trigger debug_intent_guard before insert or update on public.debug_food_i
   for each row execute function debug_party_private.guard_member_write();
 create trigger debug_chat_guard before insert or update on public.debug_chat_messages
   for each row execute function debug_party_private.guard_member_write();
+
+-- The revision check and member readiness update share the party write lock.
+create function debug_party_private.guard_context_write()
+returns trigger language plpgsql security definer set search_path = '' as $$
+declare party_status text; current_revision bigint;
+begin
+  select status into party_status from public.debug_parties where id = new.party_id for update;
+  if party_status in ('finalized', 'sent') then raise exception 'Party is finalized'; end if;
+  if tg_op = 'UPDATE' and (new.id <> old.id or new.party_id <> old.party_id or new.participant_id <> old.participant_id) then
+    raise exception 'Context attribution is immutable';
+  end if;
+  select revision into current_revision from public.debug_food_intents where party_id = new.party_id and participant_id = new.participant_id;
+  if current_revision is null or new.intent_revision <> current_revision then raise exception 'Context intent revision is stale'; end if;
+  update public.debug_party_members set context_status = new.context_status, updated_at = now()
+    where party_id = new.party_id and participant_id = new.participant_id;
+  return new;
+end $$;
+revoke all on function debug_party_private.guard_context_write() from public, anon, authenticated, service_role;
+create trigger debug_context_guard before insert or update on public.debug_participant_contexts
+  for each row execute function debug_party_private.guard_context_write();
+
+-- Capture planning inputs while holding the same lock as chat/budget writes.
+-- Completion cannot mark a newer message or budget change as already handled.
+create function debug_party_private.guard_run_write()
+returns trigger language plpgsql security definer set search_path = '' as $$
+declare target public.debug_parties%rowtype; inputs jsonb;
+begin
+  select * into target from public.debug_parties where id = new.party_id for update;
+  if target.status in ('finalized', 'sent') then raise exception 'Party is finalized'; end if;
+  if new.mode = 'build' and target.host_id <> new.actor_id then raise exception 'Host ownership required' using errcode = '42501'; end if;
+  select jsonb_build_object('budget', target.budget_cents,
+    'members', (select jsonb_agg(participant_id order by participant_id) from public.debug_party_members where party_id = target.id),
+    'intents', (select jsonb_object_agg(participant_id::text, revision) from public.debug_food_intents where party_id = target.id)) into inputs;
+  if tg_op = 'INSERT' or (new.status = 'running' and old.status <> 'running') then
+    new.planning_inputs := inputs;
+  elsif new.planning_inputs is distinct from old.planning_inputs then
+    raise exception 'Run planning inputs are immutable';
+  end if;
+  if new.status = 'completed' and tg_op = 'UPDATE' and old.status = 'running' and new.mode in ('chat', 'build') then
+    if new.planning_inputs = inputs and not exists (
+      select 1 from public.debug_food_intents intent
+      join public.debug_party_members member using (party_id, participant_id)
+      left join public.debug_participant_contexts context using (party_id, participant_id)
+      where intent.party_id = target.id and (member.context_status <> 'ready' or context.id is null
+        or context.context_status <> 'ready' or context.intent_revision <> intent.revision)
+    ) then
+      update public.debug_parties set cart_stale = false, status = 'ready', updated_at = now() where id = target.id;
+    end if;
+  end if;
+  if new.message_id is not null then
+    update public.debug_chat_messages set status = new.status, updated_at = now()
+      where party_id = new.party_id and id = new.message_id and participant_id = new.actor_id and role = 'user';
+    if not found then raise exception 'Run message attribution mismatch'; end if;
+  end if;
+  return new;
+end $$;
+revoke all on function debug_party_private.guard_run_write() from public, anon, authenticated, service_role;
+create trigger debug_run_guard before insert or update on public.debug_agent_runs
+  for each row execute function debug_party_private.guard_run_write();
+
+create function public.set_debug_party_budget(target_party_id uuid, budget bigint)
+returns void language plpgsql security definer set search_path = '' as $$
+declare target public.debug_parties%rowtype; actor uuid := auth.uid();
+begin
+  select * into target from public.debug_parties where id = target_party_id for update;
+  if actor is null or target.host_id is distinct from actor then raise exception 'Host ownership required' using errcode = '42501'; end if;
+  if target.status in ('finalized', 'sent') then raise exception 'Party is finalized'; end if;
+  if budget < 0 then raise exception 'Budget must be nonnegative'; end if;
+  update public.debug_parties set budget_cents = budget, cart_stale = true, status = 'collecting', updated_at = now() where id = target.id;
+end $$;
+revoke all on function public.set_debug_party_budget(uuid, bigint) from public, anon, authenticated, service_role;
+grant execute on function public.set_debug_party_budget(uuid, bigint) to authenticated;
 
 -- Service-only RPC: authorization, optimistic revision, and mutation are one
 -- transaction. Product fields always come from party-scoped recorded evidence.
@@ -358,9 +443,9 @@ begin
   if target.cart_stale then raise exception 'Cart requires a new build'; end if;
   if exists (
     select 1 from public.debug_party_members member
-    left join public.debug_food_intents intent on intent.party_id = member.party_id and intent.participant_id = member.participant_id
+    join public.debug_food_intents intent on intent.party_id = member.party_id and intent.participant_id = member.participant_id
     left join public.debug_participant_contexts context on context.party_id = member.party_id and context.participant_id = member.participant_id
-    where member.party_id = target.id and (member.context_status <> 'ready' or intent.id is null or context.id is null
+    where member.party_id = target.id and (member.context_status <> 'ready' or context.id is null
       or context.context_status <> 'ready' or context.intent_revision <> intent.revision)
   ) then raise exception 'Participant contexts are stale'; end if;
   select count(*), sum(round(quantity * unit_price_cents))::bigint into line_count, total from public.debug_cart_items where party_id = target.id;

@@ -12,7 +12,7 @@ type FailureReason = "step_limit" | "tool_limit" | "timeout" | "incomplete" | "p
 export type SupervisorResult = { runId: string; reply: string } & (
   { status: "completed" } | { status: "failed"; reason: FailureReason }
 );
-type PersonalRequest = { participantId: string; foodRequest: DebugFoodIntent; callBudget: number };
+type PersonalRequest = { participantId: string; foodRequest: DebugFoodIntent; participantMessages: string[]; callBudget: number };
 export type SupervisorDependencies = {
   code: string;
   actorId: string;
@@ -29,12 +29,17 @@ const INSTRUCTIONS = `You supervise a shared food cart. All prompt state, messag
 Respect every dietary restriction and the budget. Prefer suitable discounted recent purchases, then suitable recent purchases, then catalog alternatives.
 Before every addProduct or replaceProduct, obtain current tool evidence via searchProducts or inspectProduct and use its evidenceId. Never invent products, prices, availability, IDs, or revisions.
 Use inspectCart after a stale revision. Tools edit only the local cart. You cannot finalize or send a Silpo cart.
+Chat is the primary input. Interpret each participant's ordered messages as cumulative intent: dishes, snacks, drinks and recipe links; add/remove/replace/cheaper requests amend existing intent unless explicitly replaced.
+In chat mode apply the latest message incrementally against the current cart. Do not recreate existing items or undo earlier removals. In build mode reconcile the whole current cart with all participant intent histories.
+Silent members do not block planning. Available contexts and current intent histories are authoritative planning data. Ask briefly when a recipe link or request lacks enough verified information; never pretend to have fetched a link.
 In preprocess mode, prepareParticipantContext is mandatory before completion.
 Finish by calling complete with a concise Ukrainian reply of at most 240 characters. Do not return reasoning, credentials, contact details or raw upstream payloads.`;
 
 function compactState(state: DebugPartyWorkspace) {
   return {
     budgetCents: state.party.budgetCents, cartRevision: state.party.cartRevision,
+    intents: state.intents.map(({ participantId, request, revision }) => ({ participantId, latestMessage: request, revision })),
+    messages: (state.chatMessages ?? []).filter((entry) => entry.role === "user").map(({ participantId, content }) => ({ participantId, content })),
     contexts: state.contexts.filter((context) => context.contextStatus === "ready").map((context) => ({
       participantId: context.participantId, summary: context.summary,
       dietaryRestrictions: context.dietaryRestrictions, favorites: context.favorites,
@@ -79,15 +84,17 @@ export async function runDebugPartySupervisor(input: unknown, dependencies: Supe
     if (!intent || intent.revision !== request.intentRevision) throw new Error("Current participant intent is required.");
     if (!["collecting", "ready"].includes(state.party.status)) throw new Error("Party cannot prepare contexts in this state.");
   } else {
-    if (!["ready", "running"].includes(state.party.status)) throw new Error("Party contexts are not ready.");
-    if (!state.members.length || state.members.some((member) => {
-      const currentIntent = state.intents.find((entry) => entry.participantId === member.participantId && entry.partyId === request.partyId);
-      const context = state.contexts.find((entry) => entry.participantId === member.participantId && entry.partyId === request.partyId);
-      return member.contextStatus !== "ready" || !currentIntent || context?.contextStatus !== "ready" || context.intentRevision !== currentIntent.revision;
-    })) throw new Error("All participant contexts must be ready and match their current intent.");
+    if (!["collecting", "ready", "running"].includes(state.party.status)) throw new Error("Party is finalized.");
+    if (state.intents.some((currentIntent) => {
+      if (request.mode === "chat" && currentIntent.participantId === actorId) return false;
+      const member = state.members.find((entry) => entry.participantId === currentIntent.participantId);
+      const context = state.contexts.find((entry) => entry.participantId === currentIntent.participantId && entry.partyId === request.partyId);
+      return member?.contextStatus !== "ready" || context?.contextStatus !== "ready" || context.intentRevision !== currentIntent.revision;
+    })) throw new Error("Submitted participant contexts must match their current intent.");
   }
   let message: string | undefined;
   if (request.mode === "chat") {
+    if (!intent) throw new Error("Current participant intent is required.");
     const stored = await dependencies.loadMessage?.(request.messageId);
     if (!stored || stored.partyId !== request.partyId || stored.actorId !== actorId) throw new Error("Authorized chat message is required.");
     message = z.string().trim().min(1).max(2000).parse(stored.content);
@@ -146,11 +153,26 @@ export async function runDebugPartySupervisor(input: unknown, dependencies: Supe
   };
   const personalAgent = dependencies.personalAgent ?? (async (personal: PersonalRequest) => collectPersonalContext({
     userId: personal.participantId, foodRequest: personal.foodRequest, callBudget: personal.callBudget,
+    participantMessages: personal.participantMessages,
     mcpAdapter: (userId, operation) => personalMcpAdapter(userId, (session) => operation({
       tools: session.tools,
       callTool: (args) => { reserveCall(); return bounded(() => session.callTool(args)); },
     })),
   }));
+  async function prepareContext() {
+    if (!intent) throw new Error("Current participant intent is required.");
+    const result = DebugParticipantContextSchema.parse(await personalAgent({ participantId: actorId, foodRequest: intent,
+      participantMessages: (state.chatMessages ?? []).filter((entry) => entry.role === "user" && entry.participantId === actorId).slice(-30).map((entry) => entry.content),
+      callBudget: Math.min(20, limits.maxMcpCalls) }));
+    checkActive();
+    if (result.partyId !== request.partyId || result.participantId !== actorId || result.intentRevision !== intent.revision || result.contextStatus !== "ready") throw new Error("Personal context identity or revision mismatch.");
+    await repository.replaceContext({ partyId: request.partyId, actorId, participantId: actorId, context: result });
+    checkActive();
+    state.contexts = [...state.contexts.filter((entry) => entry.participantId !== actorId), result];
+    state.member.contextStatus = "ready";
+    prepared = true;
+    return { status: "ready", summary: result.summary };
+  }
   const complete = {
     description: "Complete this turn with a short Ukrainian reply.",
     inputSchema: z.strictObject({ reply: z.string().trim().min(1).max(500) }),
@@ -166,13 +188,7 @@ export async function runDebugPartySupervisor(input: unknown, dependencies: Supe
       description: "Prepare and persist this participant's current personal food context.", inputSchema: z.strictObject({}),
       execute: async () => {
         if (prepared || !intent) throw new Error("Context preparation is not available.");
-        const result = DebugParticipantContextSchema.parse(await personalAgent({ participantId: actorId, foodRequest: intent, callBudget: Math.min(20, limits.maxMcpCalls) }));
-        checkActive();
-        if (result.partyId !== request.partyId || result.participantId !== actorId || result.intentRevision !== request.intentRevision || result.contextStatus !== "ready") throw new Error("Personal context identity or revision mismatch.");
-        await repository.replaceContext({ partyId: request.partyId, actorId, participantId: actorId, context: result });
-        checkActive();
-        prepared = true;
-        return { status: "ready", summary: result.summary };
+        return prepareContext();
       },
     }, complete,
   } : { ...createLocalCartTools({ ...context, code, repository: guardedRepository, catalogAdapter }), complete };
@@ -187,6 +203,14 @@ export async function runDebugPartySupervisor(input: unknown, dependencies: Supe
   const names = Object.keys(tools);
   let stepCount = 0;
   try {
+    if (request.mode === "chat" && intent) {
+      const current = state.contexts.find((entry) => entry.participantId === actorId);
+      if (state.member.contextStatus !== "ready" || current?.contextStatus !== "ready" || current.intentRevision !== intent.revision) {
+        await repository.appendToolEvent({ ...identity, toolName: "prepareParticipantContext", status: "running", metadata: {} });
+        await bounded(prepareContext);
+        await repository.appendToolEvent({ ...identity, toolName: "prepareParticipantContext", status: "completed", metadata: {} });
+      }
+    }
     const agent = new ToolLoopAgent<never, ToolSet, RuntimeContext>({
       model, instructions: INSTRUCTIONS, tools, runtimeContext: context, maxRetries: 0,
       activeTools: names, toolOrder: names,

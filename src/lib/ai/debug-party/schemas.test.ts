@@ -84,7 +84,7 @@ describe("debug-party schemas", () => {
   });
 
   it("limits food requests to a compact supervisor-safe length", () => {
-    expect(() => FoodRequestSchema.parse("x".repeat(501))).toThrow();
+    expect(() => FoodRequestSchema.parse("x".repeat(2001))).toThrow();
   });
 
   it("rejects unknown keys at the party boundary", () => {

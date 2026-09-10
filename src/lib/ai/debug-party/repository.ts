@@ -2,11 +2,14 @@ import { z } from "zod";
 
 import {
   DebugCartItemSchema,
+  DebugChatMessageSchema,
+  type DebugChatMessage,
   DebugFoodIntentSchema,
   DebugParticipantContextSchema,
   DebugPartyMemberSchema,
   DebugPartySchema,
   DebugProductEvidenceSchema,
+  FoodRequestSchema,
   type DebugCartItem,
   type DebugFoodIntent,
   type DebugParticipantContext,
@@ -117,6 +120,7 @@ export type DebugPartyWorkspace = {
   intents: DebugFoodIntent[];
   contexts: DebugParticipantContext[];
   cartItems: DebugCartItem[];
+  chatMessages?: DebugChatMessage[];
 };
 
 export type DebugPartyWorkspaceRow = {
@@ -125,6 +129,7 @@ export type DebugPartyWorkspaceRow = {
   intents: unknown[];
   contexts: unknown[];
   cartItems: unknown[];
+  chatMessages?: unknown[];
 };
 
 type RunInsert = {
@@ -143,6 +148,12 @@ type RunInsert = {
  * the authorization boundary; all methods on this port are server-only writes.
  */
 export interface DebugPartyPersistencePort {
+  createParty?(actorId: string): Promise<unknown>;
+  joinParty?(code: string, actorId: string): Promise<unknown>;
+  updateBudget?(input: { partyId: string; actorId: string; budgetCents: number | null }): Promise<void>;
+  insertMessage?(input: { partyId: string; actorId: string; content: string }): Promise<unknown>;
+  finalizeParty?(partyId: string, actorId: string): Promise<unknown>;
+  insertAssistantReply?(input: { partyId: string; actorId: string; runId: string; content: string }): Promise<void>;
   findWorkspace(code: string, actorId: string): Promise<DebugPartyWorkspaceRow | null>;
   findMembership(partyId: string, participantId: string): Promise<unknown | null>;
   insertRun(input: RunInsert): Promise<unknown>;
@@ -159,6 +170,12 @@ function object(value: unknown, label: string): UnknownRow {
     throw new Error(`${label} має бути об'єктом бази даних.`);
   }
   return value as UnknownRow;
+}
+
+function mapMessage(value: unknown): DebugChatMessage {
+  const row = object(value, "Chat message");
+  return DebugChatMessageSchema.parse({ id: row.id, partyId: row.party_id, participantId: row.participant_id,
+    role: row.role, content: row.content, status: row.status, createdAt: row.created_at, updatedAt: row.updated_at });
 }
 
 function mapParty(value: unknown): DebugParty {
@@ -288,6 +305,50 @@ function rpcMutation(mutation: CartMutation): Record<string, unknown> {
 export class DebugPartyRepository {
   constructor(private readonly persistence: DebugPartyPersistencePort) {}
 
+  async persistAssistantReply(code: string, actorId: string, runId: string, content: string): Promise<void> {
+    const { party } = await this.loadWorkspace(code, actorId);
+    if (!this.persistence.insertAssistantReply) throw new Error("Chat replies are unavailable.");
+    await this.persistence.insertAssistantReply({ partyId: party.id, actorId, runId: IdSchema.parse(runId), content: z.string().trim().min(1).max(240).parse(content) });
+  }
+
+  async createParty(actorId: string): Promise<string> {
+    if (!this.persistence.createParty) throw new Error("Party creation is unavailable.");
+    return DebugPartySchema.shape.code.parse(await this.persistence.createParty(IdSchema.parse(actorId)));
+  }
+
+  async joinParty(code: string, actorId: string): Promise<string> {
+    if (!this.persistence.joinParty) throw new Error("Party joining is unavailable.");
+    const normalized = DebugPartySchema.shape.code.parse(code.trim().toUpperCase());
+    return DebugPartySchema.shape.code.parse(await this.persistence.joinParty(normalized, IdSchema.parse(actorId)));
+  }
+
+  async saveBudget(code: string, actorId: string, budgetCents: number | null): Promise<void> {
+    const { party, member } = await this.loadWorkspace(code, actorId);
+    if (member.role !== "host" || party.hostId !== actorId) throw new Error("Лише Host може змінювати бюджет.");
+    if (!this.persistence.updateBudget) throw new Error("Budget updates are unavailable.");
+    await this.persistence.updateBudget({ partyId: party.id, actorId, budgetCents: NonNegativeIntegerSchema.nullable().parse(budgetCents) });
+  }
+
+  async appendChatMessage(code: string, actorId: string, content: string): Promise<DebugChatMessage> {
+    const { party } = await this.loadWorkspace(code, actorId);
+    if (["finalized", "sent"].includes(party.status)) throw new Error("Party is finalized.");
+    if (!this.persistence.insertMessage) throw new Error("Chat is unavailable.");
+    const message = mapMessage(await this.persistence.insertMessage({ partyId: party.id, actorId, content: FoodRequestSchema.parse(content) }));
+    if (message.partyId !== party.id || message.participantId !== actorId || message.role !== "user") throw new Error("Chat attribution mismatch.");
+    return message;
+  }
+
+  async loadChatMessages(code: string, actorId: string): Promise<DebugChatMessage[]> {
+    return (await this.loadWorkspace(code, actorId)).chatMessages ?? [];
+  }
+
+  async finalizeParty(code: string, actorId: string): Promise<string> {
+    const { party, member } = await this.loadWorkspace(code, actorId);
+    if (member.role !== "host" || party.hostId !== actorId) throw new Error("Лише Host може фіналізувати кошик.");
+    if (!this.persistence.finalizeParty) throw new Error("Finalization is unavailable.");
+    return IdSchema.parse(await this.persistence.finalizeParty(party.id, actorId));
+  }
+
   async loadWorkspace(code: string, actorId: string): Promise<DebugPartyWorkspace> {
     const workspace = await this.persistence.findWorkspace(code, actorId);
     if (!workspace) throw new Error("Ви не є учасником цієї вечірки.");
@@ -304,6 +365,7 @@ export class DebugPartyRepository {
       intents: workspace.intents.map(mapIntent),
       contexts: workspace.contexts.map(mapContext),
       cartItems: workspace.cartItems.map(mapCartItem),
+      chatMessages: (workspace.chatMessages ?? []).map(mapMessage),
     };
   }
 
@@ -390,8 +452,51 @@ export async function createDebugPartyRepository(): Promise<DebugPartyRepository
   ]);
   const authenticated = await createClient();
   const admin = createAdminClient();
+  async function requireSession(actorId: string) {
+    const { data, error } = await authenticated.auth.getUser();
+    if (error || data.user?.id !== actorId) throw new Error("Session actor mismatch.");
+  }
 
   return new DebugPartyRepository({
+    async insertAssistantReply({ partyId, actorId, runId, content }) {
+      await requireSession(actorId);
+      const { data: run, error: runError } = await admin.from("debug_agent_runs").select("id")
+        .eq("id", runId).eq("party_id", partyId).eq("actor_id", actorId).in("status", ["completed", "failed"]).maybeSingle();
+      if (runError) throw runError;
+      if (!run) throw new Error("Completed actor run is required.");
+      const { error } = await admin.from("debug_chat_messages").insert({ party_id: partyId, participant_id: null, role: "assistant", content, status: "completed" });
+      if (error) throw error;
+    },
+    async createParty(actorId) {
+      await requireSession(actorId);
+      const { data, error } = await authenticated.rpc("create_debug_party");
+      if (error) throw error;
+      return data;
+    },
+    async joinParty(code, actorId) {
+      await requireSession(actorId);
+      const { data, error } = await authenticated.rpc("join_debug_party", { party_code: code });
+      if (error) throw error;
+      return data;
+    },
+    async updateBudget({ partyId, actorId, budgetCents }) {
+      await requireSession(actorId);
+      const { error } = await authenticated.rpc("set_debug_party_budget", { target_party_id: partyId, budget: budgetCents });
+      if (error) throw error;
+    },
+    async insertMessage({ partyId, actorId, content }) {
+      await requireSession(actorId);
+      const { data, error } = await authenticated.from("debug_chat_messages").insert({ party_id: partyId, participant_id: actorId, role: "user", content })
+        .select("id, party_id, participant_id, role, content, status, created_at, updated_at").single();
+      if (error) throw error;
+      return data;
+    },
+    async finalizeParty(partyId, actorId) {
+      await requireSession(actorId);
+      const { data, error } = await authenticated.rpc("finalize_debug_party", { target_party_id: partyId });
+      if (error) throw error;
+      return data;
+    },
     async findWorkspace(code, actorId) {
       const { data: party, error: partyError } = await authenticated
         .from("debug_parties")
@@ -402,18 +507,19 @@ export async function createDebugPartyRepository(): Promise<DebugPartyRepository
       if (!party) return null;
 
       const partyId = String(party.id);
-      const [membersResult, intentsResult, contextsResult, cartItemsResult] = await Promise.all([
+      const [membersResult, intentsResult, contextsResult, cartItemsResult, messagesResult] = await Promise.all([
         authenticated.from("debug_party_members").select("party_id, participant_id, role, context_status, joined_at, updated_at").eq("party_id", partyId),
         authenticated.from("debug_food_intents").select("id, party_id, participant_id, request, revision, created_at, updated_at").eq("party_id", partyId),
         authenticated.from("debug_participant_contexts").select("id, party_id, participant_id, intent_revision, context_status, purchase_history_status, dietary_restrictions, favorites, recent_products, summary, collected_at, created_at, updated_at").eq("party_id", partyId),
         authenticated.from("debug_cart_items").select("id, party_id, product_id, company_id, branch_id, name, quantity, unit, unit_price_cents, discount_cents, image_url, evidence_id, observed_at, introduced_revision, created_at, updated_at").eq("party_id", partyId),
+        authenticated.from("debug_chat_messages").select("id, party_id, participant_id, role, content, status, created_at, updated_at").eq("party_id", partyId).order("created_at", { ascending: false }).order("id", { ascending: false }).limit(200),
       ]);
-      for (const result of [membersResult, intentsResult, contextsResult, cartItemsResult]) {
+      for (const result of [membersResult, intentsResult, contextsResult, cartItemsResult, messagesResult]) {
         if (result.error) throw result.error;
       }
       const members = membersResult.data ?? [];
       if (!members.some((member) => member.participant_id === actorId)) return null;
-      return { party, members, intents: intentsResult.data ?? [], contexts: contextsResult.data ?? [], cartItems: cartItemsResult.data ?? [] };
+      return { party, members, intents: intentsResult.data ?? [], contexts: contextsResult.data ?? [], cartItems: cartItemsResult.data ?? [], chatMessages: [...(messagesResult.data ?? [])].reverse() };
     },
 
     async findMembership(partyId, participantId) {
@@ -458,7 +564,6 @@ export async function createDebugPartyRepository(): Promise<DebugPartyRepository
     async upsertContext(input) {
       const context = input.context;
       const { data, error } = await admin.from("debug_participant_contexts").upsert({
-        id: context.id,
         party_id: context.partyId,
         participant_id: context.participantId,
         intent_revision: context.intentRevision,
