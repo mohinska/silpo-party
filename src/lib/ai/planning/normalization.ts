@@ -240,17 +240,13 @@ function declaredContext(participant: EventParticipant): UserFoodContext {
     softPreferences,
     dislikes,
     usefulPatterns: [],
-    missingInformation:
-      participant.contextCompleteness === "complete"
-        ? []
-        : ["Потрібно підтвердити повноту харчових обмежень."],
-    completeness:
-      participant.contextCompleteness === "complete" ? "complete" : "partial",
+    missingInformation: [],
+    completeness: "complete",
     evidence,
     summary:
       hardConstraints.length > 0
         ? `Відомі жорсткі обмеження: ${hardConstraints.map(({ label }) => label).join(", ")}.`
-        : "Заявлених жорстких обмежень немає; повноту контексту потрібно врахувати.",
+        : "Заявлених жорстких обмежень немає.",
   });
 }
 
@@ -309,10 +305,11 @@ export async function normalizeParticipantFoodContext({
       })),
     usefulPatterns: [],
     missingInformation:
-      signals.completeness === "complete"
-        ? []
-        : ["Контекст Сільпо неповний або недоступний."],
-    completeness: signals.completeness,
+      signals.completeness === "partial"
+        ? ["Контекст Сільпо містить неоднозначні дані."]
+        : [],
+    completeness:
+      signals.completeness === "partial" ? "partial" : "complete",
     evidence: signals.evidence,
     summary: "Контекст Сільпо нормалізовано детерміновано.",
   });
@@ -334,11 +331,7 @@ export async function normalizeParticipantFoodContext({
     30,
   );
   const completeness =
-    signals.completeness === "unavailable"
-      ? declared.completeness
-      : signals.completeness === "complete" && declared.completeness === "complete"
-        ? "complete"
-        : "partial";
+    signals.completeness === "partial" ? "partial" : "complete";
 
   return UserFoodContextSchema.parse({
     participantId: participant.id,

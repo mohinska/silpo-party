@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { PendingButton } from "@/components/pending-button";
 import { getCurrentUser } from "@/lib/auth";
 import { joinParty } from "@/app/parties/actions";
 
@@ -15,7 +16,7 @@ export default async function JoinPage({ params }: PageProps<"/join/[code]">) {
         <h1>Вас запросили до спільного кошика</h1>
         <p className="hero-copy">Код події: <strong>{code}</strong>. Учасникам не потрібно підключати акаунт «Сільпо».</p>
         {user ? (
-          <form action={joinAction}><button className="primary-button" type="submit">Приєднатися</button></form>
+          <form action={joinAction}><PendingButton className="primary-button" pendingLabel="Приєднуємо…">Приєднатися</PendingButton></form>
         ) : (
           <a className="google-button" href={`/auth/google?next=${encodeURIComponent(`/join/${code}`)}`}><span className="google-g">G</span> Увійти й приєднатися</a>
         )}

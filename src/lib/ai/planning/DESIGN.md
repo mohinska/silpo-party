@@ -31,8 +31,10 @@ event + Host budget + food intents + UserFoodContext[]
 ```
 
 At most three participant loaders run concurrently. Results remain ordered by
-the event participant list. A participant failure becomes explicit unavailable
-context and cannot be interpreted as an absence of restrictions.
+the event participant list. A participant failure remains explicit unavailable
+provenance, but absent restrictions are treated as no restrictions and do not
+block planning. Explicitly discovered ambiguous restriction data remains partial
+until it is normalized or clarified.
 
 ## MCP data minimization
 
@@ -87,10 +89,12 @@ AI_PLANNER_MODEL=deepseek-v4-flash
 
 DeepSeek requests use Chat Completions JSON-object mode
 (`response_format: { "type": "json_object" }`), not native JSON Schema mode.
-The expected Zod-derived JSON Schema is included in the model instructions;
-the returned JSON is parsed and validated with the existing Zod schema. A
-parse or validation failure receives one correction attempt, with Zod issues
-included when validation failed. The retry is validated identically.
+The provider adapter owns that wire-format detail and returns JSON text. One
+shared structured-output helper adds the Zod-derived JSON Schema to the model
+instructions, parses the returned text, validates it with the existing Zod
+schema, and owns the single repair attempt. Provider/API, invalid-JSON, and
+schema-validation failures remain distinct typed domain errors; the retry is
+validated identically.
 
 Tests inject generation adapters or a model provider and require no network or
 credentials.

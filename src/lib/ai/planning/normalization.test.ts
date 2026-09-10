@@ -60,6 +60,34 @@ describe("extractParticipantFoodSignals", () => {
 });
 
 describe("normalizeParticipantFoodContext", () => {
+  it("treats absent restrictions as confirmed none when MCP context is unavailable", async () => {
+    const context = await normalizeParticipantFoodContext({
+      participant: {
+        ...participant,
+        preferences: {
+          ...participant.preferences,
+          allergies: [],
+          dietaryRestrictions: [],
+        },
+        contextCompleteness: "unknown",
+      },
+      signals: {
+        participantId: "p1",
+        restrictions: [],
+        favorites: [],
+        ambiguousFragments: [],
+        evidence: [],
+        completeness: "unavailable",
+      },
+    });
+
+    expect(context).toMatchObject({
+      hardConstraints: [],
+      missingInformation: [],
+      completeness: "complete",
+    });
+  });
+
   it("uses deterministic facts without calling the semantic adapter", async () => {
     let adapterCalls = 0;
     const signals = extractParticipantFoodSignals("p1", {

@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { PendingButton } from "@/components/pending-button";
 import { requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import { getConnectionStatus } from "@/lib/silpo/oauth";
@@ -38,7 +39,7 @@ export default async function ProfilePage({ searchParams }: ProfilePageProps) {
             <h1>{name}</h1>
             <p className="muted">{user.email}</p>
           </div>
-          <form action="/auth/logout" method="post"><button className="text-button">Вийти</button></form>
+          <form action="/auth/logout" method="post"><PendingButton className="text-button" pendingLabel="Виходимо…">Вийти</PendingButton></form>
         </div>
 
         {params.silpo === "connected" && <p className="notice success">Акаунт «Сільпо» підключено.</p>}
@@ -56,7 +57,7 @@ export default async function ProfilePage({ searchParams }: ProfilePageProps) {
             </p>
           </div>
           {connection ? (
-            <form action="/auth/silpo/disconnect" method="post"><button className="secondary-button">Відключити</button></form>
+            <form action="/auth/silpo/disconnect" method="post"><PendingButton className="secondary-button" pendingLabel="Відключаємо…">Відключити</PendingButton></form>
           ) : (
             <a className="primary-button" href="/auth/silpo/connect">Підключити Сільпо</a>
           )}
@@ -83,7 +84,7 @@ export default async function ProfilePage({ searchParams }: ProfilePageProps) {
           <label>Дієтичні обмеження<textarea name="dietary_restrictions" defaultValue={profile?.dietary_restrictions ?? ""} placeholder="Наприклад: без глютену" /></label>
           <label>Не люблю<textarea name="dislikes" defaultValue={profile?.dislikes ?? ""} placeholder="Наприклад: кінза" /></label>
           <label>Вподобання<textarea name="preferences" defaultValue={profile?.preferences ?? ""} placeholder="Наприклад: більше овочів" /></label>
-          <button className="primary-button" type="submit">Зберегти профіль</button>
+          <PendingButton className="primary-button" pendingLabel="Зберігаємо…">Зберегти профіль</PendingButton>
         </form>
       </section>
     </main>
