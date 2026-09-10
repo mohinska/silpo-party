@@ -3,6 +3,8 @@ import "server-only";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { getAccessToken, SILPO_MCP_URL } from "@/lib/silpo/oauth";
+import { readToolData } from "./tool-data";
+export { readToolData } from "./tool-data";
 
 const PERSONAL_TOOLS = [
   "silpo_get_my_profile",
@@ -14,26 +16,10 @@ export type PersonalContext = Record<string, unknown>;
 
 export type SilpoTool = {
   name: string;
+  description?: string;
   inputSchema?: Record<string, unknown>;
+  annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean };
 };
-
-export function readToolData(result: unknown): unknown {
-  if (!result || typeof result !== "object") return result;
-  const record = result as Record<string, unknown>;
-  if (record.structuredContent) return record.structuredContent;
-  if (!Array.isArray(record.content)) return result;
-  const values = record.content.flatMap((block) => {
-    if (!block || typeof block !== "object") return [];
-    const text = (block as Record<string, unknown>).text;
-    if (typeof text !== "string") return [];
-    try {
-      return [JSON.parse(text) as unknown];
-    } catch {
-      return [text];
-    }
-  });
-  return values.length === 1 ? values[0] : values;
-}
 
 export async function withSilpoMcp<T>(
   userId: string,
@@ -54,6 +40,14 @@ export async function withSilpoMcp<T>(
   } finally {
     await client.close().catch(() => undefined);
   }
+}
+
+/** Keep credentials inside the existing session; expose only advertised tools. */
+export async function withDiscoveredSilpoTools<T>(
+  userId: string,
+  operation: (client: Client, tools: Map<string, SilpoTool>) => Promise<T>,
+): Promise<T> {
+  return withSilpoMcp(userId, operation);
 }
 
 export async function getPersonalSilpoContext(userId: string): Promise<PersonalContext | null> {
