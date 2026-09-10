@@ -1,5 +1,6 @@
 import "server-only";
 
+import { createHash } from "node:crypto";
 import { RecipeSchema, type Recipe } from "./proposal-schemas";
 
 function decodeHtml(value: string) {
@@ -35,6 +36,47 @@ function parseIngredient(raw: string) {
   const token = match[2].toLocaleLowerCase("uk-UA").replace(/\s|\./g, "");
   const unit = /^(kg|кг)$/.test(token) ? "kg" : /^(g|гр|г)$/.test(token) ? "g" : /^(ml|мл)$/.test(token) ? "ml" : /^(l|л)$/.test(token) ? "l" : /^(tbsp|стл)$/.test(token) ? "tbsp" : /^(tsp|чл)$/.test(token) ? "tsp" : "piece";
   return { name: decodeHtml(match[3]), quantity: numberFrom(match[1]), unit, variant: "standard", optional: false } as const;
+}
+
+function participantDetailSegments(details: string) {
+  return details
+    .replace(/\r/g, "\n")
+    .split(/[\n;]+/u)
+    .flatMap((segment) => segment.split(/,(?!\d)/u))
+    .map((segment) => segment.replace(/^\s*(?:[-*•]|\d+[.)])\s*/u, "").trim())
+    .filter(Boolean);
+}
+
+/**
+ * Turns quantities explicitly supplied by a participant into a recipe. Nothing
+ * is inferred: every non-heading line must contain a supported quantity/unit.
+ */
+export function parseParticipantRecipeDetails(input: { dishName: string; details: string; defaultServings?: number }): Recipe {
+  const segments = participantDetailSegments(input.details);
+  const servingPattern = /(?:for\s+)?(\d+)\s*(?:servings?|portions?|\u043f\u043e\u0440\u0446(?:\u0456\u0457|\u0438\u0439|\u0456\u044e|\u0456\u044f))/iu;
+  const servingSegment = segments.find((segment) => servingPattern.test(segment));
+  const baseServings = Number(servingSegment?.match(servingPattern)?.[1] ?? input.defaultServings ?? 1);
+  const content = segments
+    .filter((segment) => segment !== servingSegment)
+    .map((segment) => segment.replace(/^(?:ingredients?|\u0456\u043d\u0433\u0440\u0435\u0434\u0456\u0454\u043d\u0442\u0438)\s*:\s*/iu, "").trim())
+    .filter(Boolean);
+  const ingredients = content.map(parseIngredient);
+
+  if (!content.length || ingredients.some((ingredient) => !ingredient)) {
+    throw new Error("Participant details do not contain a complete structured ingredient list.");
+  }
+
+  const digest = createHash("sha256").update(`${input.dishName}\n${input.details}`).digest("hex").slice(0, 20);
+  return RecipeSchema.parse({
+    id: `participant-details:${digest}`,
+    title: input.dishName,
+    source: {
+      provider: "participant",
+      title: "Ingredients supplied in participant request details",
+    },
+    baseServings,
+    ingredients,
+  });
 }
 
 export function parseRecipeDocument(html: string, url: string): Recipe {
@@ -77,4 +119,18 @@ export async function retrieveRecipe(input: { dishName: string; requestedUrl?: s
   if (!response.ok) throw new Error("The recipe source could not be retrieved.");
   const recipe = parseRecipeDocument(await response.text(), response.url || url);
   return input.requestedUrl && recipe.source.provider !== "silpo" ? { ...recipe, source: { ...recipe.source, provider: "participant" } } : recipe;
+}
+
+export async function retrieveRecipeForRequest(
+  input: { dishName: string; requestedUrl?: string; details?: string; targetServings?: number },
+  fetcher: typeof fetch = fetch,
+): Promise<Recipe> {
+  if (input.details?.trim()) {
+    try {
+      return parseParticipantRecipeDetails({ dishName: input.dishName, details: input.details, defaultServings: input.targetServings });
+    } catch {
+      // Free-form details are allowed; an incomplete list falls back to a sourced page.
+    }
+  }
+  return retrieveRecipe({ dishName: input.dishName, requestedUrl: input.requestedUrl }, fetcher);
 }

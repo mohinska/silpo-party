@@ -16,7 +16,7 @@ export const RecipeSchema = z.object({
   title: z.string().min(1),
   source: z.object({
     provider: z.enum(["silpo", "participant", "publisher"]),
-    url: z.url(),
+    url: z.url().optional(),
     title: z.string().min(1),
     retrievedAt: z.iso.datetime({ offset: true }).optional(),
   }).strict(),
