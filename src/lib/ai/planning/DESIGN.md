@@ -31,8 +31,10 @@ event + Host budget + food intents + UserFoodContext[]
 ```
 
 At most three participant loaders run concurrently. Results remain ordered by
-the event participant list. A participant failure becomes explicit unavailable
-context and cannot be interpreted as an absence of restrictions.
+the event participant list. A participant failure remains explicit unavailable
+provenance, but absent restrictions are treated as no restrictions and do not
+block planning. Explicitly discovered ambiguous restriction data remains partial
+until it is normalized or clarified.
 
 ## MCP data minimization
 

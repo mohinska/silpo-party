@@ -68,9 +68,9 @@ for richer context, but it is not required to join or collaborate.
   integration also reads favorites when the tool is available. After native integration
   by Silpo developers, MCP can pull this information from each person's Silpo profile.
   Supabase may store only product-specific answers that MCP does not provide.
-- If required information is unavailable or incomplete, ask the affected member only
-  for what is missing and keep onboarding minimal. Missing information is not
-  equivalent to having no restrictions.
+- Empty or unavailable allergy and dietary-restriction data means the participant has
+  no such restrictions and must not block planning. Ask the affected member only when
+  an explicit restriction fragment is ambiguous and keep onboarding minimal.
 - Each member can submit a meal type (lunch/dinner/etc.), describe what they want to
   eat, name a dish, provide a recipe/content link, or choose “I don't care”. The agent
   converts food/recipe inputs into structured dishes, ingredients and
@@ -321,7 +321,8 @@ join attempts. Reopening the link as an existing participant must not use anothe
 An unauthenticated visitor must retain the invitation context through sign-in.
 
 Suggested consistency rules to confirm:
-- Missing profile answers must not count as an absence of restrictions.
+- Empty or unavailable allergy/restriction sources count as no restrictions; only
+  explicit ambiguous restriction data requires clarification.
 - Allergy/restriction conflicts must remain visible and cannot silently disappear
   under budget optimization; agree on hard-constraint and override policy.
 - Combine only compatible ingredients/variants and compatible units; preserve dish
@@ -352,8 +353,8 @@ Suggested consistency rules to confirm:
    pack sizes and reduced leftovers. If requests cannot fit the budget, show options
    for the Host to choose. Product substitution permissions remain to be specified
    separately from the confirmed rule for dish changes.
-4. **Member food context:** required MCP fields, completeness gating, visibility,
-   freshness and conflicts with product-specific answers remain open. Store actionable
+4. **Member food context:** visibility, freshness and conflicts with product-specific
+   answers remain open. Missing MCP data does not gate planning. Store actionable
    food restrictions rather than inferring them from a religious identity.
 5. **Services and purchase endpoint:** confirm the known Silpo MCP profile/restriction
    fields, authorization model, AI service, hosting and persistence resources. How is
@@ -478,6 +479,10 @@ confirmed sections prevail over superseded interpretations.
   DeepSeek request formatting is isolated in the provider adapter; shared JSON parsing,
   Zod validation and repair live in one provider-neutral helper. Provider/API,
   invalid-JSON and schema-validation failures use separate typed domain errors.
+- 2026-09-10: Empty or unavailable allergy/restriction data is treated as confirmed
+  absence of restrictions and does not block planning. Explicit ambiguous restriction
+  fragments still require normalization or clarification. Food intent `none` means
+  “I don't care” and allows the planner to choose a suitable dish.
 
 ## Contradictions resolved and ambiguity retained
 

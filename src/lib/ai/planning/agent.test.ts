@@ -397,28 +397,33 @@ describe("planEvent", () => {
     });
   });
 
-  it("represents unavailable MCP context explicitly in planner input", async () => {
-    let contextStatus: string | undefined;
-    await planEvent(validInput, {
+  it("allows planning when MCP is unavailable and no restrictions are declared", async () => {
+    let normalizedCompleteness: string | undefined;
+    let missingInformation: string[] | undefined;
+    const result = await planEvent(validInput, {
       loadParticipantContext: async () => ({
         status: "unavailable",
         reason: "not connected",
       }),
       generatePlan: async ({ input }) => {
-        contextStatus = input.participants[0].foodContext.completeness;
+        normalizedCompleteness = input.participants[0].foodContext.completeness;
+        missingInformation = input.participants[0].foodContext.missingInformation;
         return {
           ...safePlan,
-          status: "needs_input",
           participantInsights: [
             { ...safePlan.participantInsights[0], contextStatus: "unavailable" },
           ],
-          dishes: [],
-          hardConstraintChecks: [],
         };
       },
     });
 
-    expect(contextStatus).not.toBe("complete");
+    expect(normalizedCompleteness).toBe("complete");
+    expect(missingInformation).toEqual([]);
+    expect(result.plan.status).toBe("ready");
+    expect(result.contextTrace[0]).toMatchObject({
+      status: "unavailable",
+      reason: "not connected",
+    });
   });
 
   it("rejects a structured plan with an unsafe eater assignment", async () => {
