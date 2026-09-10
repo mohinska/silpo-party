@@ -51,11 +51,11 @@ function participantDetailSegments(details: string) {
  * Turns quantities explicitly supplied by a participant into a recipe. Nothing
  * is inferred: every non-heading line must contain a supported quantity/unit.
  */
-export function parseParticipantRecipeDetails(input: { dishName: string; details: string }): Recipe {
+export function parseParticipantRecipeDetails(input: { dishName: string; details: string; defaultServings?: number }): Recipe {
   const segments = participantDetailSegments(input.details);
   const servingPattern = /(?:for\s+)?(\d+)\s*(?:servings?|portions?|\u043f\u043e\u0440\u0446(?:\u0456\u0457|\u0438\u0439|\u0456\u044e|\u0456\u044f))/iu;
   const servingSegment = segments.find((segment) => servingPattern.test(segment));
-  const baseServings = Number(servingSegment?.match(servingPattern)?.[1] ?? 1);
+  const baseServings = Number(servingSegment?.match(servingPattern)?.[1] ?? input.defaultServings ?? 1);
   const content = segments
     .filter((segment) => segment !== servingSegment)
     .map((segment) => segment.replace(/^(?:ingredients?|\u0456\u043d\u0433\u0440\u0435\u0434\u0456\u0454\u043d\u0442\u0438)\s*:\s*/iu, "").trim())
@@ -122,12 +122,12 @@ export async function retrieveRecipe(input: { dishName: string; requestedUrl?: s
 }
 
 export async function retrieveRecipeForRequest(
-  input: { dishName: string; requestedUrl?: string; details?: string },
+  input: { dishName: string; requestedUrl?: string; details?: string; targetServings?: number },
   fetcher: typeof fetch = fetch,
 ): Promise<Recipe> {
   if (input.details?.trim()) {
     try {
-      return parseParticipantRecipeDetails({ dishName: input.dishName, details: input.details });
+      return parseParticipantRecipeDetails({ dishName: input.dishName, details: input.details, defaultServings: input.targetServings });
     } catch {
       // Free-form details are allowed; an incomplete list falls back to a sourced page.
     }

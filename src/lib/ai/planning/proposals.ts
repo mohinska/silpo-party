@@ -47,7 +47,7 @@ export async function createMealProposal(input: { party: Party; members: PartyMe
     const requestedUrl = requested?.kind === "recipe" ? requested.recipeUrl : undefined;
     const details = requested?.kind === "recipe" || requested?.kind === "dish" ? requested.notes : undefined;
     try {
-      const scaled = scaleRecipe(await retrieveRecipeForRequest({ dishName: dish.name, requestedUrl, details }), dish.servings);
+      const scaled = scaleRecipe(await retrieveRecipeForRequest({ dishName: dish.name, requestedUrl, details, targetServings: dish.servings }), dish.servings);
       recipes.push(scaled);
       dishRows.push({ id: dish.id, name: dish.name, eaterParticipantIds: dish.eaterParticipantIds, servings: dish.servings, recipeId: scaled.id, readyMeal: false });
       scaled.ingredients.forEach((ingredient) => rawIngredients.push({ dishId: dish.id, ...ingredient }));

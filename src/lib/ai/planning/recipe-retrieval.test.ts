@@ -60,6 +60,16 @@ describe("recipe provenance", () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
+  it("treats quantities without a serving label as totals for the planned servings", async () => {
+    const recipe = await retrieveRecipeForRequest({
+      dishName: "Hawaiian pizza",
+      details: "Flour 500 g; Cheese 200 g",
+      targetServings: 2,
+    });
+
+    expect(recipe.baseServings).toBe(2);
+  });
+
   it("extracts a complete sourced recipe without inventing fields", () => {
     const html = `<h1>Паста</h1><p>на 4 порції</p><ul>
       <li data-autotestid="recipes-ingredient-item-0">Молоко <span>500 мл</span></li>
