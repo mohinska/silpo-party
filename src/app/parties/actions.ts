@@ -208,28 +208,37 @@ export async function syncSilpoBasket(code: string) {
   revalidatePath(`/party/${party.code}`);
 }
 
-export async function setItemShares(code: string, itemId: string, formData: FormData) {
-  const { supabase, party } = await partyForMember(code);
-  if (party.status !== "collecting") throw new Error("Подію вже фіналізовано.");
-  const ownerIds = formData.getAll("owner_ids").map(String);
-  if (!ownerIds.length) throw new Error("Оберіть хоча б одного учасника.");
-  const { error } = await supabase.rpc("set_item_shares", {
-    target_item_id: itemId,
-    owner_ids: ownerIds,
-  });
-  if (error) throw error;
-  revalidatePath(`/party/${party.code}`);
-}
-
-export async function finalizeParty(code: string) {
+export async function finalizeParty(code: string, formData: FormData) {
   const { user, supabase, party } = await partyForMember(code);
   if (party.host_id !== user.id) throw new Error("Лише Організатор може фіналізувати кошик.");
-  const { count, error: countError } = await supabase
+  if (party.status !== "collecting") throw new Error("Кошик уже фіналізовано.");
+  const { data: items, error: itemsError } = await supabase
     .from("basket_items")
-    .select("id", { count: "exact", head: true })
+    .select("id")
     .eq("party_id", party.id);
-  if (countError) throw countError;
-  if (!count) throw new Error("Додайте хоча б один товар перед фіналізацією.");
+  if (itemsError) throw itemsError;
+  if (!items.length) throw new Error("Додайте хоча б один товар перед фіналізацією.");
+
+  const { data: members, error: membersError } = await supabase
+    .from("party_members")
+    .select("user_id")
+    .eq("party_id", party.id);
+  if (membersError) throw membersError;
+  const memberIds = new Set(members.map((member) => member.user_id));
+  const shareUpdates = items.map((item) => {
+    const ownerIds = [...new Set(formData.getAll(`owner_ids:${item.id}`).map(String))];
+    if (!ownerIds.length) throw new Error("Оберіть хоча б одного учасника для кожного товару.");
+    if (ownerIds.some((ownerId) => !memberIds.has(ownerId))) {
+      throw new Error("Вибрано учасника, якого немає в цій події.");
+    }
+    return { target_item_id: item.id, owner_ids: ownerIds };
+  });
+  const shareResults = await Promise.all(
+    shareUpdates.map((update) => supabase.rpc("set_item_shares", update)),
+  );
+  const shareError = shareResults.find((result) => result.error)?.error;
+  if (shareError) throw shareError;
+
   const synchronized = await syncPartyBasketToSilpo(party.id, party.host_id);
   if (!synchronized.ok) throw new Error(synchronized.error);
   const { error } = await supabase.from("parties").update({

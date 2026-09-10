@@ -9,7 +9,6 @@ import {
   runAiMealPlanner,
   saveBudget,
   saveIntent,
-  setItemShares,
   syncSilpoBasket,
 } from "@/app/parties/actions";
 import { CopyInvite } from "@/components/copy-invite";
@@ -450,13 +449,9 @@ export default async function PartyPage({ params }: PageProps<"/party/[code]">) 
           const itemShares = shares
             .filter((share) => share.item_id === item.id)
             .map((share) => share.user_id);
-          const shareAction = setItemShares.bind(
-            null,
-            party.code,
-            item.id,
-          );
+          const ownerIds = itemShares.length ? itemShares : [item.added_by];
           return (
-            <form action={shareAction} className="share-editor" key={item.id}>
+            <article className="share-editor" key={item.id}>
               <div>
                 <strong>{item.name}</strong>
                 <small>{formatMoney(lineTotalCents(item))}</small>
@@ -466,29 +461,22 @@ export default async function PartyPage({ params }: PageProps<"/party/[code]">) 
                   <label
                     key={member.user_id}
                     className={
-                      itemShares.includes(member.user_id) ? "selected" : ""
+                      ownerIds.includes(member.user_id) ? "selected" : ""
                     }
                   >
                     <input
-                      name="owner_ids"
+                      name={`owner_ids:${item.id}`}
                       value={member.user_id}
                       type="checkbox"
-                      defaultChecked={itemShares.includes(member.user_id)}
-                      disabled={!isOpen}
+                      defaultChecked={ownerIds.includes(member.user_id)}
+                      disabled={!isOpen || !isHost}
+                      form={isOpen && isHost ? "finalize-cart" : undefined}
                     />
                     {member.display_name}
                   </label>
                 ))}
               </div>
-              {isOpen && (
-                <PendingButton
-                  className="text-button"
-                  pendingLabel="Зберігаємо…"
-                >
-                  Зберегти
-                </PendingButton>
-              )}
-            </form>
+            </article>
           );
         })}
         {!items.length && (
@@ -545,7 +533,7 @@ export default async function PartyPage({ params }: PageProps<"/party/[code]">) 
         </div>
         {isHost &&
           (isOpen ? (
-            <form action={finalizeParty.bind(null, party.code)}>
+            <form id="finalize-cart" action={finalizeParty.bind(null, party.code)}>
               <PendingButton
                 className="primary-button"
                 disabled={!items.length}
