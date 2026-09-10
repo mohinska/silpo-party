@@ -548,7 +548,7 @@ export default async function PartyPage({ params }: PageProps<"/party/[code]">) 
             <form action={finalizeParty.bind(null, party.code)}>
               <PendingButton
                 className="primary-button"
-                disabled={!party.budget_cents || !items.length}
+                disabled={!items.length}
                 pendingLabel="Фіналізуємо…"
               >
                 Фіналізувати кошик

@@ -224,7 +224,6 @@ export async function setItemShares(code: string, itemId: string, formData: Form
 export async function finalizeParty(code: string) {
   const { user, supabase, party } = await partyForMember(code);
   if (party.host_id !== user.id) throw new Error("Лише Організатор може фіналізувати кошик.");
-  if (!party.budget_cents) throw new Error("Спочатку встановіть бюджет події.");
   const { count, error: countError } = await supabase
     .from("basket_items")
     .select("id", { count: "exact", head: true })
