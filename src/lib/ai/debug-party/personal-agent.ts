@@ -6,7 +6,7 @@ import { DebugParticipantContextSchema, FoodRequestSchema, type DebugFoodIntent,
 
 export const PersonalSignalsSchema = DebugParticipantContextSchema.pick({
   dietaryRestrictions: true, favorites: true, recentProducts: true, purchaseHistoryStatus: true,
-}).extend({ foodRequest: FoodRequestSchema });
+}).extend({ foodRequest: FoodRequestSchema, participantMessages: z.array(FoodRequestSchema).max(30).default([]) });
 export type PersonalSignals = z.infer<typeof PersonalSignalsSchema>;
 const NormalizedPersonalSchema = DebugParticipantContextSchema.pick({
   dietaryRestrictions: true, favorites: true, summary: true,
@@ -129,10 +129,11 @@ function extractOrders(payload: unknown): PersonalSignals["recentProducts"] | un
   return products;
 }
 
-export async function collectPersonalContext({ userId, foodRequest, callBudget, mcpAdapter = personalMcpAdapter, normalizer }: {
+export async function collectPersonalContext({ userId, foodRequest, participantMessages = [], callBudget, mcpAdapter = personalMcpAdapter, normalizer }: {
   userId: string;
   foodRequest: Pick<DebugFoodIntent, "partyId" | "participantId" | "revision" | "request">;
   callBudget: number;
+  participantMessages?: string[];
   mcpAdapter?: PersonalMcpAdapter;
   normalizer?: PersonalNormalizer;
 }): Promise<DebugParticipantContext> {
@@ -141,7 +142,7 @@ export async function collectPersonalContext({ userId, foodRequest, callBudget, 
     partyId: foodRequest.partyId, participantId: userId, intentRevision: foodRequest.revision,
   });
   const budget = z.number().int().min(0).max(20).parse(callBudget);
-  let signals = PersonalSignalsSchema.parse({ foodRequest: foodRequest.request, dietaryRestrictions: [], favorites: [], recentProducts: [], purchaseHistoryStatus: "unavailable" });
+  let signals = PersonalSignalsSchema.parse({ foodRequest: foodRequest.request, participantMessages, dietaryRestrictions: [], favorites: [], recentProducts: [], purchaseHistoryStatus: "unavailable" });
   await mcpAdapter(userId, async (session) => {
     const capabilities = discoverPersonalCapabilities(session.tools);
     let calls = 0;

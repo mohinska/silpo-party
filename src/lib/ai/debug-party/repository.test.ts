@@ -59,6 +59,28 @@ function port(overrides: Partial<DebugPartyPersistencePort> = {}): DebugPartyPer
 }
 
 describe("DebugPartyRepository", () => {
+  it("authorizes chat against membership and derives attribution from the actor", async () => {
+    const inserted: unknown[] = [];
+    const repository = new DebugPartyRepository(port({ insertMessage: async (input) => {
+      inserted.push(input);
+      return { id: "message", party_id: input.partyId, participant_id: input.actorId, role: "user", content: input.content,
+        status: "queued", created_at: now, updated_at: now };
+    } }));
+    await expect(repository.appendChatMessage("ABCDEFGH", "user-outsider", "Add water")).rejects.toThrow();
+    expect(inserted).toEqual([]);
+    expect(await repository.appendChatMessage("ABCDEFGH", "user-host", "  Add water  ")).toMatchObject({ participantId: "user-host", content: "Add water" });
+    expect(inserted).toEqual([{ partyId: "party-1", actorId: "user-host", content: "Add water" }]);
+  });
+
+  it("denies member budget and finalization writes before persistence", async () => {
+    const writes: string[] = [];
+    const repository = new DebugPartyRepository(port({ findWorkspace: async () => ({ party,
+      members: [{ ...hostMember, role: "member" }], intents: [], contexts: [], cartItems: [] }),
+      updateBudget: async () => { writes.push("budget"); }, finalizeParty: async () => { writes.push("finalize"); return "snapshot"; } }));
+    await expect(repository.saveBudget("ABCDEFGH", "user-host", 100)).rejects.toThrow("Host");
+    await expect(repository.finalizeParty("ABCDEFGH", "user-host")).rejects.toThrow("Host");
+    expect(writes).toEqual([]);
+  });
   it("rejects a user who is not a party participant", async () => {
     const repository = new DebugPartyRepository(port({ findWorkspace: async () => null }));
 

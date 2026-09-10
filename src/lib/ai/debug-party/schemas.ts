@@ -8,7 +8,15 @@ const NonNegativeInteger = z.number().int().nonnegative();
 const PositiveInteger = z.number().int().positive();
 const NonNegativeCents = NonNegativeInteger;
 
-export const FoodRequestSchema = BoundedText;
+export const FoodRequestSchema = NonEmptyText.max(2000);
+
+export const DebugChatMessageSchema = z.strictObject({
+  id: Id, partyId: Id, participantId: Id.nullable(),
+  role: z.enum(["user", "assistant"]), content: FoodRequestSchema,
+  status: z.enum(["queued", "running", "completed", "failed"]),
+  createdAt: Timestamp, updatedAt: Timestamp,
+});
+export type DebugChatMessage = z.infer<typeof DebugChatMessageSchema>;
 
 export const DebugPartyStatusSchema = z.enum([
   "collecting",

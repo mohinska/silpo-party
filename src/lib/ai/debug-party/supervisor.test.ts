@@ -62,6 +62,43 @@ describe("debug party supervisor", () => {
     expect(f.model.doGenerateCalls).toHaveLength(0);
   });
 
+  it("processes a first chat automatically while other members remain silent", async () => {
+    const f = setup();
+    f.workspace.party.status = "collecting";
+    f.workspace.contexts = [];
+    f.workspace.members[0].contextStatus = "pending";
+    f.workspace.members.push({ ...f.workspace.members[0], participantId: "silent", role: "member" });
+    const result = await runDebugPartySupervisor({ ...build, mode: "chat", messageId: "message" }, f.dependencies);
+    expect(result.status).toBe("completed");
+    expect(f.repository.replaceContext).toHaveBeenCalledWith(expect.objectContaining({ participantId: "host" }));
+    expect(f.model.doGenerateCalls[0].tools?.map((tool) => tool.name)).toContain("addProduct");
+  });
+
+  it("allows an explicit rebuild when a joined member has not sent any intent", async () => {
+    const f = setup();
+    f.workspace.party.status = "collecting";
+    f.workspace.members.push({ ...f.workspace.members[0], participantId: "silent", role: "member", contextStatus: "pending" });
+    expect(await runDebugPartySupervisor(build, f.dependencies)).toMatchObject({ status: "completed" });
+  });
+
+  it("requires current context for other members who have submitted intent in chat mode", async () => {
+    const f = setup();
+    f.workspace.members.push({ ...f.workspace.members[0], participantId: "other", role: "member", contextStatus: "pending" });
+    f.workspace.intents.push({ ...f.workspace.intents[0], participantId: "other" });
+    await expect(runDebugPartySupervisor({ ...build, mode: "chat", messageId: "message" }, f.dependencies)).rejects.toThrow(/contexts/);
+    expect(f.model.doGenerateCalls).toHaveLength(0);
+  });
+
+  it("reuses current personal context and passes cumulative chat history to the supervisor", async () => {
+    const f = setup();
+    f.workspace.chatMessages = ["Піца", "Додай воду", "Прибери піцу"].map((content, index) => ({
+      id: `m${index}`, partyId: "party", participantId: "host", role: "user", content, status: "completed", createdAt: now, updatedAt: now,
+    }));
+    await runDebugPartySupervisor({ ...build, mode: "chat", messageId: "message" }, f.dependencies);
+    expect(f.personalAgent).not.toHaveBeenCalled();
+    expect(JSON.stringify(f.model.doGenerateCalls[0].prompt)).toContain("Прибери піцу");
+  });
+
   it("rejects actor and party substitution before starting a run", async () => {
     const f = setup();
     await expect(runDebugPartySupervisor({ ...build, actorId: "other" }, f.dependencies)).rejects.toThrow();
