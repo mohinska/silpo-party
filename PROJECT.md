@@ -475,6 +475,9 @@ confirmed sections prevail over superseded interpretations.
   unsupported native JSON Schema response formatting. Zod-derived schemas are sent
   as explicit JSON instructions, responses retain strict Zod validation, and one
   validation-aware correction attempt is allowed without changing agent contracts.
+  DeepSeek request formatting is isolated in the provider adapter; shared JSON parsing,
+  Zod validation and repair live in one provider-neutral helper. Provider/API,
+  invalid-JSON and schema-validation failures use separate typed domain errors.
 
 ## Contradictions resolved and ambiguity retained
 

@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { PendingButton } from "@/components/pending-button";
 import { formatMoney, listMyParties } from "@/lib/parties";
 import { createParty, joinByCode } from "./actions";
 
@@ -13,12 +14,12 @@ export default async function PartiesPage() {
           <form action={createParty} className="panel stack">
             <h2>Створити подію</h2>
             <label>Назва<input name="title" required maxLength={80} placeholder="Вечеря у суботу" /></label>
-            <button className="primary-button" type="submit">Створити як Організатор</button>
+            <PendingButton className="primary-button" pendingLabel="Створюємо…">Створити як Організатор</PendingButton>
           </form>
           <form action={joinByCode} className="panel stack">
             <h2>Приєднатися за кодом</h2>
             <label>Код події<input name="code" required minLength={8} maxLength={8} placeholder="A1B2C3D4" autoCapitalize="characters" /></label>
-            <button className="secondary-button" type="submit">Приєднатися</button>
+            <PendingButton className="secondary-button" pendingLabel="Приєднуємо…">Приєднатися</PendingButton>
           </form>
         </div>
         <section className="panel stack">

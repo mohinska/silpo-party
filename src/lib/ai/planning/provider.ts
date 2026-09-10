@@ -2,11 +2,22 @@ import {
   createOpenAICompatible,
   type OpenAICompatibleProvider,
 } from "@ai-sdk/openai-compatible";
+import { generateText } from "ai";
 
-import { PlanningConfigurationError } from "./errors";
+import {
+  PlanningConfigurationError,
+  PlanningProviderError,
+} from "./errors";
+import type {
+  JsonTextGenerationRequest,
+  JsonTextGenerator,
+} from "./structured-output";
 
 type PlanningEnvironment = Record<string, string | undefined>;
-type PlanningLanguageModel = ReturnType<OpenAICompatibleProvider>;
+export type PlanningJsonModel = {
+  readonly modelId: string;
+  generateJsonText: JsonTextGenerator;
+};
 
 export type PlanningProviderConfig = {
   provider: "deepseek";
@@ -17,9 +28,25 @@ export type PlanningProviderConfig = {
 };
 
 export type PlanningModelProvider = {
-  participantNormalizerModel(): PlanningLanguageModel;
-  groupPlannerModel(): PlanningLanguageModel;
+  participantNormalizerModel(): PlanningJsonModel;
+  groupPlannerModel(): PlanningJsonModel;
 };
+
+function createJsonTextModel(
+  model: ReturnType<OpenAICompatibleProvider>,
+): PlanningJsonModel {
+  return {
+    modelId: model.modelId,
+    async generateJsonText({ system, prompt }: JsonTextGenerationRequest) {
+      try {
+        const result = await generateText({ model, system, prompt });
+        return result.text;
+      } catch (error) {
+        throw new PlanningProviderError(error);
+      }
+    },
+  };
+}
 
 function required(environment: PlanningEnvironment, name: keyof PlanningEnvironment) {
   const value = environment[name]?.trim();
@@ -59,10 +86,15 @@ export function createConfiguredPlanningProvider(
     apiKey: config.apiKey,
     baseURL: config.baseUrl,
     supportsStructuredOutputs: false,
+    transformRequestBody: (body) => ({
+      ...body,
+      response_format: { type: "json_object" },
+    }),
   });
 
   return {
-    participantNormalizerModel: () => deepseek(config.normalizerModel),
-    groupPlannerModel: () => deepseek(config.plannerModel),
+    participantNormalizerModel: () =>
+      createJsonTextModel(deepseek(config.normalizerModel)),
+    groupPlannerModel: () => createJsonTextModel(deepseek(config.plannerModel)),
   };
 }

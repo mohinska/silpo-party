@@ -1,11 +1,3 @@
-import {
-  generateText,
-  NoObjectGeneratedError,
-  Output,
-  type LanguageModel,
-} from "ai";
-import { z, type ZodType } from "zod";
-
 import type {
   ParticipantContextLoader,
   ParticipantContextTraceEntry,
@@ -14,7 +6,11 @@ import {
   createPlanningDebugEmitter,
   type PlanningDebugEventSink,
 } from "./debug-stream";
-import { PlanningProviderError } from "./errors";
+import {
+  isPlanningGenerationError,
+  PlanningProviderError,
+  PlanningSchemaValidationError,
+} from "./errors";
 import {
   extractParticipantFoodSignals,
   normalizeParticipantFoodContext,
@@ -37,6 +33,7 @@ import {
   type UserFoodContext,
 } from "./schemas";
 import { assertEventPlanSafety } from "./safety";
+import { generateValidatedJson } from "./structured-output";
 
 export type PlanGenerationAdapter = (request: {
   input: GroupPlanningInput;
@@ -57,55 +54,13 @@ export type PlanningResult = {
   contextTrace: ParticipantContextTraceEntry[];
 };
 
-async function generateValidatedJson<T>({
-  model,
-  system,
-  prompt,
-  schema,
-}: {
-  model: LanguageModel;
-  system: string;
-  prompt: string;
-  schema: ZodType<T>;
-}): Promise<T> {
-  const schemaInstruction = `Return only one complete JSON object with no Markdown or commentary. The JSON must match this JSON Schema exactly:\n${JSON.stringify(z.toJSONSchema(schema))}`;
-  let correction = "";
-
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    let output: unknown;
-    try {
-      const result = await generateText({
-        model,
-        system: `${system}\n\n${schemaInstruction}`,
-        prompt: `${prompt}${correction}`,
-        output: Output.json(),
-      });
-      output = result.output;
-    } catch (error) {
-      if (attempt === 1 || !NoObjectGeneratedError.isInstance(error)) {
-        throw error;
-      }
-      correction =
-        "\n\nThe previous response was not valid JSON. Return a complete corrected JSON object matching the supplied schema.";
-      continue;
-    }
-
-    const validation = schema.safeParse(output);
-    if (validation.success) return validation.data;
-    if (attempt === 1) throw validation.error;
-
-    correction = `\n\nThe previous JSON did not match the required schema. Correct it and return the complete JSON object again. Validation errors:\n${JSON.stringify(validation.error.issues)}\nPrevious JSON:\n${JSON.stringify(output)}`;
-  }
-
-  throw new Error("JSON generation exhausted its validation attempts.");
-}
-
 function createDefaultNormalizer(
   provider: PlanningModelProvider,
 ): ParticipantNormalizationAdapter {
   return async ({ participantId, signals }) => {
     return generateValidatedJson({
-      model: provider.participantNormalizerModel(),
+      generateJsonText:
+        provider.participantNormalizerModel().generateJsonText,
       system:
         "Normalize only the supplied bounded food signals. Do not invent allergies or treat missing data as unrestricted. Return concise Ukrainian summaries.",
       prompt: `Return a normalized food context for ${participantId} as JSON: ${JSON.stringify(signals)}`,
@@ -119,7 +74,7 @@ function createDefaultPlanner(
 ): PlanGenerationAdapter {
   return async ({ system, prompt }) => {
     return generateValidatedJson({
-      model: provider.groupPlannerModel(),
+      generateJsonText: provider.groupPlannerModel().generateJsonText,
       system,
       prompt,
       schema: EventPlanSchema,
@@ -333,12 +288,17 @@ export async function planEvent(
     debug.completed("model", { rawOutput: rawPlan });
   } catch (error) {
     debug.failed("model", error);
-    throw new PlanningProviderError();
+    if (isPlanningGenerationError(error)) throw error;
+    throw new PlanningProviderError(error);
   }
   debug.started("contract");
   let plan: EventPlan;
   try {
-    plan = EventPlanSchema.parse(rawPlan);
+    const validation = EventPlanSchema.safeParse(rawPlan);
+    if (!validation.success) {
+      throw new PlanningSchemaValidationError(validation.error);
+    }
+    plan = validation.data;
     debug.completed("contract", { plan });
   } catch (error) {
     debug.failed("contract", error);

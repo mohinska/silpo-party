@@ -15,10 +15,12 @@ export {
 } from "./normalization";
 export type { ParticipantNormalizationAdapter } from "./normalization";
 export { createConfiguredPlanningProvider } from "./provider";
-export type { PlanningModelProvider } from "./provider";
+export type { PlanningJsonModel, PlanningModelProvider } from "./provider";
 export {
   PlanningConfigurationError,
+  PlanningInvalidJsonError,
   PlanningProviderError,
+  PlanningSchemaValidationError,
   PlanningSafetyError,
 } from "./errors";
 export type { PlanningSafetyIssue } from "./errors";
