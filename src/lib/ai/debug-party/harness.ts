@@ -3,7 +3,8 @@ import "server-only";
 import { ToolLoopAgent, isStepCount, type LanguageModel, type ToolSet } from "ai";
 import { z } from "zod";
 import { createDebugCatalogGateway, type DebugCatalogGateway } from "./catalog-gateway";
-import { catalogSearchTrace, CatalogTraceSchema } from "./catalog-trace";
+import { catalogSearchTrace } from "./catalog-trace";
+import { DebugHarnessTraceSchema, type DebugHarnessTrace } from "./harness-contract";
 import { createLocalCartTools } from "./cart-tools";
 import type { CandidatePreselector } from "./candidate-preselector";
 import { retrieveRecipe } from "../planning/recipe-retrieval";
@@ -18,24 +19,6 @@ const HarnessInputSchema = z.strictObject({
   message: z.string().trim().min(1).max(2_000),
   mcpAccessToken: z.string().trim().min(1).max(16_000),
 });
-const HarnessTraceSchema = z.strictObject({
-  toolName: z.string().regex(/^[a-zA-Z0-9_.:-]{1,200}$/),
-  status: z.enum(["completed", "failed"]),
-  durationMs: z.number().int().nonnegative(),
-  trace: CatalogTraceSchema.nullable(),
-  selectedEvidenceId: z.string().trim().min(1).max(200).nullable(),
-  errorCode: z.string().regex(/^[A-Z0-9_-]{1,80}$/).nullable(),
-  recipe: z.object({
-    title: z.string().trim().min(1).max(300),
-    sourceUrl: z.url().nullable(),
-    servings: z.number().int().positive(),
-    ingredients: z.array(z.strictObject({
-      name: z.string().trim().min(1).max(160), quantity: z.number().finite().positive(), unit: z.enum(["g", "kg", "ml", "l", "piece", "tbsp", "tsp"]), optional: z.boolean(),
-    })).min(1).max(100),
-  }).nullable(),
-});
-
-export type DebugHarnessTrace = z.infer<typeof HarnessTraceSchema>;
 export type DebugHarnessSession = {
   readonly id: string;
   workspace: DebugPartyWorkspace;
@@ -120,7 +103,7 @@ export async function runDebugHarness(input: unknown, dependencies: HarnessDepen
       stopWhen: [isStepCount(limits.maxSteps), () => reply !== undefined],
       onToolExecutionEnd: ({ toolCall, toolOutput, toolExecutionMs }) => {
         const metadata = traceMetadata(toolCall.toolName, toolCall.input, toolOutput);
-        session.trace.push(HarnessTraceSchema.parse({
+        session.trace.push(DebugHarnessTraceSchema.parse({
           toolName: toolCall.toolName,
           status: toolOutput.type === "tool-error" ? "failed" : "completed",
           durationMs: Math.max(0, Math.round(toolExecutionMs)),
@@ -223,7 +206,7 @@ function traceMetadata(toolName: string, input: unknown, toolOutput: unknown) {
     }
   }
   if (toolName === "resolveRecipe" && toolOutput && typeof toolOutput === "object" && "output" in toolOutput) {
-    const recipe = HarnessTraceSchema.shape.recipe.unwrap().safeParse(toolOutput.output);
+    const recipe = DebugHarnessTraceSchema.shape.recipe.unwrap().safeParse(toolOutput.output);
     return { trace: null, selectedEvidenceId, errorCode: null, recipe: recipe.success ? recipe.data : null };
   }
   return { trace: null, selectedEvidenceId, errorCode: null, recipe: null };
