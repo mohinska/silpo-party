@@ -58,4 +58,15 @@ describe("AI Debug harness route", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ trace: [{ recipe: { title: "Карбонара", ingredients: [{ name: "Спагеті" }] } }] });
   });
+
+  it("returns only a stable local diagnostic code when the harness fails", async () => {
+    vi.stubEnv("NODE_ENV", "development");
+    vi.stubEnv("AI_DEBUG_HARNESS_SECRET", "local-secret");
+    harness.runDebugHarness.mockRejectedValue(Object.assign(new Error("provider response included private-token"), { code: "HARNESS_RECIPE_FAILED" }));
+
+    const response = await POST(request({ message: "карбонара", mcpAccessToken: "private-token" }, "Bearer local-secret"));
+
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({ error: "Harness run failed.", code: "HARNESS_RECIPE_FAILED" });
+  });
 });

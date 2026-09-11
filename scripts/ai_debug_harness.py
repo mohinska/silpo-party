@@ -59,13 +59,25 @@ def redact(value: Any) -> Any:
     return value
 
 
+def http_error_detail(error: urllib.error.HTTPError) -> str | None:
+    """Read just the allowlisted local diagnostic code, never an upstream error body."""
+    try:
+        payload = json.loads(error.read().decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    code = payload.get("code") if isinstance(payload, Mapping) else None
+    return code if isinstance(code, str) and code.startswith("HARNESS_") else None
+
+
 def json_request(url: str, body: Mapping[str, Any], headers: Mapping[str, str] | None = None) -> dict[str, Any]:
     request = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), method="POST", headers={"content-type": "application/json", **(headers or {})})
     try:
         with urllib.request.urlopen(request, timeout=90) as response:
             decoded = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
-        raise RuntimeError(f"HTTP {error.code} from {urllib.parse.urlparse(url).netloc}") from error
+        detail = http_error_detail(error)
+        suffix = f" · {detail}" if detail else ""
+        raise RuntimeError(f"HTTP {error.code} from {urllib.parse.urlparse(url).netloc}{suffix}") from error
     if not isinstance(decoded, dict):
         raise RuntimeError("Expected a JSON object response.")
     return decoded

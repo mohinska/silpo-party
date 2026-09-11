@@ -53,6 +53,21 @@ export function createDebugHarnessSession(): DebugHarnessSession {
   };
 }
 
+export function harnessFailureCodeForTool(toolName: string | undefined) {
+  if (toolName === "resolveRecipe") return "HARNESS_RECIPE_FAILED" as const;
+  if (["searchProducts", "inspectProduct"].includes(toolName ?? "")) return "HARNESS_CATALOG_FAILED" as const;
+  return "HARNESS_AGENT_FAILED" as const;
+}
+
+class DebugHarnessRunError extends Error {
+  readonly code: ReturnType<typeof harnessFailureCodeForTool>;
+
+  constructor(toolName: string | undefined) {
+    super("AI Debug harness run failed.");
+    this.code = harnessFailureCodeForTool(toolName);
+  }
+}
+
 export async function runDebugHarness(input: unknown, dependencies: HarnessDependencies = {}) {
   const request = HarnessInputSchema.parse(input);
   const session = dependencies.session ?? createDebugHarnessSession();
@@ -68,6 +83,7 @@ export async function runDebugHarness(input: unknown, dependencies: HarnessDepen
   });
   const tools: ToolSet = cartTools;
   let reply: string | undefined;
+  let activeToolName: string | undefined;
   session.trace = [];
   const complete = {
     description: "Finish with a concise Ukrainian reply.",
@@ -101,6 +117,7 @@ export async function runDebugHarness(input: unknown, dependencies: HarnessDepen
     const agent = new ToolLoopAgent<never, ToolSet>({
       model, instructions, tools: agentTools, activeTools: Object.keys(agentTools), toolOrder: Object.keys(agentTools), maxRetries: 0,
       stopWhen: [isStepCount(limits.maxSteps), () => reply !== undefined],
+      onToolExecutionStart: ({ toolCall }) => { activeToolName = toolCall.toolName; },
       onToolExecutionEnd: ({ toolCall, toolOutput, toolExecutionMs }) => {
         const metadata = traceMetadata(toolCall.toolName, toolCall.input, toolOutput);
         session.trace.push(DebugHarnessTraceSchema.parse({
@@ -109,6 +126,7 @@ export async function runDebugHarness(input: unknown, dependencies: HarnessDepen
           durationMs: Math.max(0, Math.round(toolExecutionMs)),
           ...metadata,
         }));
+        activeToolName = undefined;
       },
     });
     await agent.generate({
@@ -116,6 +134,8 @@ export async function runDebugHarness(input: unknown, dependencies: HarnessDepen
       abortSignal: AbortSignal.timeout(limits.totalMs),
       timeout: { totalMs: limits.totalMs, stepMs: limits.stepMs },
     });
+  } catch {
+    throw new DebugHarnessRunError(activeToolName);
   } finally {
     await gateway.close().catch(() => undefined);
   }

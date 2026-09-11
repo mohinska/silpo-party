@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { MockLanguageModelV4 } from "ai/test";
 import type { LanguageModelV4GenerateResult } from "@ai-sdk/provider";
-import { createDebugHarnessSession, runDebugHarness } from "./harness";
+import { createDebugHarnessSession, harnessFailureCodeForTool, runDebugHarness } from "./harness";
 import type { CandidatePreselector } from "./candidate-preselector";
 import type { RecipeNormalizer } from "../planning/recipe-agent";
 
@@ -16,6 +16,12 @@ function response(toolName: string, input: object): LanguageModelV4GenerateResul
 }
 
 describe("AI Debug local harness", () => {
+  it("uses only stable failure codes for the active agent boundary", () => {
+    expect(harnessFailureCodeForTool("resolveRecipe")).toBe("HARNESS_RECIPE_FAILED");
+    expect(harnessFailureCodeForTool("searchProducts")).toBe("HARNESS_CATALOG_FAILED");
+    expect(harnessFailureCodeForTool(undefined)).toBe("HARNESS_AGENT_FAILED");
+  });
+
   it("runs the sourced recipe subagent and keeps normalized ingredients in the local session", async () => {
     const session = createDebugHarnessSession();
     const model = new MockLanguageModelV4({ doGenerate: [response("resolveRecipe", { query: "Карбонара" }), response("complete", { reply: "Рецепт готовий." })] });

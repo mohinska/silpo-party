@@ -20,6 +20,12 @@ const ResponseSchema = z.strictObject({
 
 const sessions = new Map<string, { session: DebugHarnessSession; touchedAt: number }>();
 const sessionLifetimeMs = 2 * 60 * 60 * 1_000;
+const HarnessFailureCodeSchema = z.enum([
+  "HARNESS_AGENT_FAILED",
+  "HARNESS_RECIPE_FAILED",
+  "HARNESS_CATALOG_FAILED",
+  "HARNESS_RUN_FAILED",
+]);
 
 function authorized(value: string | null) {
   const secret = process.env.AI_DEBUG_HARNESS_SECRET;
@@ -38,6 +44,11 @@ function pruneSessions(now: number) {
   for (const [id, entry] of sessions) if (now - entry.touchedAt > sessionLifetimeMs) sessions.delete(id);
 }
 
+function harnessFailureCode(error: unknown) {
+  if (!error || typeof error !== "object" || !("code" in error)) return "HARNESS_RUN_FAILED";
+  return HarnessFailureCodeSchema.safeParse(error.code).data ?? "HARNESS_RUN_FAILED";
+}
+
 export async function POST(request: Request) {
   if (process.env.NODE_ENV !== "development" || !localRequest(request)) return Response.json({ error: "Not found." }, { status: 404 });
   if (!authorized(request.headers.get("authorization"))) return Response.json({ error: "Unauthorized." }, { status: 401 });
@@ -51,7 +62,7 @@ export async function POST(request: Request) {
     const result = ResponseSchema.parse(await runDebugHarness({ message: body.data.message, mcpAccessToken: body.data.mcpAccessToken }, { session }));
     sessions.set(result.sessionId, { session, touchedAt: now });
     return Response.json(result, { status: 200 });
-  } catch {
-    return Response.json({ error: "Harness run failed." }, { status: 502 });
+  } catch (error) {
+    return Response.json({ error: "Harness run failed.", code: harnessFailureCode(error) }, { status: 502 });
   }
 }
