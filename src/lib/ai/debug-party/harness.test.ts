@@ -32,6 +32,16 @@ describe("AI Debug local harness", () => {
     })).rejects.toMatchObject({ code: "HARNESS_AGENT_FAILED" });
   });
 
+  it("keeps the failed recipe-tool boundary when the agent cannot continue", async () => {
+    const model = new MockLanguageModelV4({ doGenerate: [response("resolveRecipe", { query: "Карбонара" })] });
+
+    await expect(runDebugHarness({ message: "паста карбонара", mcpAccessToken: "never-return" }, {
+      model,
+      retrieveRecipe: async () => { throw new Error("upstream recipe source failed"); },
+      createGateway: () => ({ search: async () => ({ groups: [] }), inspect: async () => [], close: async () => undefined }),
+    })).rejects.toMatchObject({ code: "HARNESS_RECIPE_FAILED" });
+  });
+
   it("runs the sourced recipe subagent and keeps normalized ingredients in the local session", async () => {
     const session = createDebugHarnessSession();
     const model = new MockLanguageModelV4({ doGenerate: [response("resolveRecipe", { query: "Карбонара" }), response("complete", { reply: "Рецепт готовий." })] });

@@ -84,6 +84,7 @@ export async function runDebugHarness(input: unknown, dependencies: HarnessDepen
   const tools: ToolSet = cartTools;
   let reply: string | undefined;
   let activeToolName: string | undefined;
+  let lastFailedToolName: string | undefined;
   session.trace = [];
   const complete = {
     description: "Finish with a concise Ukrainian reply.",
@@ -120,6 +121,7 @@ export async function runDebugHarness(input: unknown, dependencies: HarnessDepen
       onToolExecutionStart: ({ toolCall }) => { activeToolName = toolCall.toolName; },
       onToolExecutionEnd: ({ toolCall, toolOutput, toolExecutionMs }) => {
         const metadata = traceMetadata(toolCall.toolName, toolCall.input, toolOutput);
+        if (toolOutput.type === "tool-error") lastFailedToolName = toolCall.toolName;
         session.trace.push(DebugHarnessTraceSchema.parse({
           toolName: toolCall.toolName,
           status: toolOutput.type === "tool-error" ? "failed" : "completed",
@@ -139,7 +141,7 @@ export async function runDebugHarness(input: unknown, dependencies: HarnessDepen
       () => new DebugHarnessRunError(activeToolName),
     );
   } catch {
-    throw new DebugHarnessRunError(activeToolName);
+    throw new DebugHarnessRunError(activeToolName ?? lastFailedToolName);
   } finally {
     await gateway.close().catch(() => undefined);
   }

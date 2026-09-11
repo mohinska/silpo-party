@@ -1,6 +1,7 @@
 import "server-only";
 
 import { createHash } from "node:crypto";
+import { z } from "zod";
 import { RecipeSchema, type Recipe } from "./proposal-schemas";
 
 const RecipeRequestHeaders = {
@@ -8,6 +9,19 @@ const RecipeRequestHeaders = {
   Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
   "Accept-Language": "uk-UA,uk;q=0.9,en;q=0.8",
 };
+const SilpoRecipeCatalogUrl = "https://sf-ecom-api.silpo.ua/v1/recipes";
+const RecipeCatalogPageSize = 50;
+const RecipeCatalogCacheMs = 5 * 60 * 1_000;
+const RecipeCatalogPageSchema = z.object({
+  total: z.number().int().nonnegative().max(2_000),
+  items: z.array(z.object({
+    slug: z.string().regex(/^[a-z0-9-]{1,200}$/),
+    title: z.string().trim().min(1).max(300),
+  })).max(RecipeCatalogPageSize),
+});
+type RecipeCatalogLink = { readonly url: string; readonly title: string };
+
+let recipeCatalogCache: { readonly expiresAt: number; readonly links: RecipeCatalogLink[] } | undefined;
 
 function decodeHtml(value: string) {
   return value.replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&amp;/g, "&").replace(/&nbsp;/g, " ").replace(/&ndash;|&mdash;/g, "-").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
@@ -131,38 +145,78 @@ async function fetchParsedRecipe(url: string, fetcher: typeof fetch) {
   return parseRecipeDocument(await response.text(), response.url || url);
 }
 
+function dishWords(dishName: string) {
+  return dishName.toLocaleLowerCase("uk-UA").match(/[\p{L}\p{N}]+/gu) ?? [];
+}
+
+function rankRecipeLinks(dishName: string, links: readonly RecipeCatalogLink[]) {
+  const words = dishWords(dishName);
+  const phrase = words.join(" ");
+  const frequency = new Map(words.map((word) => [word, links.filter((link) => link.title.toLocaleLowerCase("uk-UA").includes(word)).length]));
+  return links.map((link) => {
+    const title = link.title.toLocaleLowerCase("uk-UA");
+    const score = words.reduce((total, word) => total + (title.includes(word) ? 1 / Math.max(1, frequency.get(word) ?? 1) : 0), phrase && title.includes(phrase) ? 10 : 0);
+    return { link, score };
+  }).filter((candidate) => candidate.score > 0)
+    .sort((left, right) => right.score - left.score || left.link.title.localeCompare(right.link.title, "uk-UA"))
+    .map((candidate) => candidate.link);
+}
+
+async function fetchRecipeCatalogPage(offset: number, fetcher: typeof fetch) {
+  const response = await fetcher(`${SilpoRecipeCatalogUrl}?limit=${RecipeCatalogPageSize}&offset=${offset}`, { cache: "no-store", headers: RecipeRequestHeaders });
+  if (!response.ok) throw new Error("Silpo recipe catalog is unavailable.");
+  const parsed = RecipeCatalogPageSchema.safeParse(await response.json());
+  if (!parsed.success) throw new Error("Silpo recipe catalog returned an invalid page.");
+  return parsed.data;
+}
+
+async function listCatalogRecipeLinks(fetcher: typeof fetch): Promise<RecipeCatalogLink[]> {
+  if (fetcher === fetch && recipeCatalogCache && recipeCatalogCache.expiresAt > Date.now()) return recipeCatalogCache.links;
+  const first = await fetchRecipeCatalogPage(0, fetcher);
+  const offsets = Array.from({ length: Math.max(0, Math.ceil(first.total / RecipeCatalogPageSize) - 1) }, (_, index) => (index + 1) * RecipeCatalogPageSize);
+  const pages = [first, ...await Promise.all(offsets.map((offset) => fetchRecipeCatalogPage(offset, fetcher)))];
+  const links = pages.flatMap((page) => page.items.map((item) => ({ url: `https://silpo.ua/recipes/${item.slug}`, title: item.title })));
+  if (!links.length) throw new Error("Silpo recipe catalog is empty.");
+  if (fetcher === fetch) recipeCatalogCache = { expiresAt: Date.now() + RecipeCatalogCacheMs, links };
+  return links;
+}
+
+async function listLandingPageRecipeLinks(fetcher: typeof fetch): Promise<RecipeCatalogLink[]> {
+  const search = await fetcher("https://silpo.ua/recipes", { cache: "no-store", headers: RecipeRequestHeaders });
+  if (!search.ok) throw new Error("Silpo recipe index is unavailable.");
+  const html = await search.text();
+  return [...html.matchAll(/<a[^>]+href=["'](\/recipes\/[a-z0-9%_-]+)["'][^>]*>([\s\S]*?)<\/a>/giu)].map((match) => ({
+    url: new URL(match[1], "https://silpo.ua").href,
+    title: decodeHtml(match[2]),
+  }));
+}
+
 export async function retrieveRecipe(input: { dishName: string; requestedUrl?: string }, fetcher: typeof fetch = fetch): Promise<Recipe> {
   if (input.requestedUrl) {
     const recipe = await fetchParsedRecipe(input.requestedUrl, fetcher);
     return recipe.source.provider !== "silpo" ? { ...recipe, source: { ...recipe.source, provider: "participant" } } : recipe;
   }
 
-  {
-    // The public `?search=` page is not a stable filtered API. Index the
-    // catalog page and rank only its actual recipe links instead.
-    const search = await fetcher("https://silpo.ua/recipes", { cache: "no-store", headers: RecipeRequestHeaders });
-    if (!search.ok) throw new Error("Silpo recipe index is unavailable.");
-    const html = await search.text();
-    const words = input.dishName.toLocaleLowerCase("uk-UA").match(/[\p{L}\p{N}]+/gu) ?? [];
-    const links = [...html.matchAll(/<a[^>]+href=["'](\/recipes\/[a-z0-9%_-]+)["'][^>]*>([\s\S]*?)<\/a>/giu)].map((match) => ({
-      url: new URL(match[1], "https://silpo.ua").href,
-      title: decodeHtml(match[2]).toLocaleLowerCase("uk-UA"),
-    }));
-    links.sort((left, right) => words.filter((word) => right.title.includes(word)).length - words.filter((word) => left.title.includes(word)).length || left.url.localeCompare(right.url));
-    // Catalog cards can point to editorial pages without a complete ingredient
-    // list. Try a small, relevance-ranked set instead of failing on the first
-    // card; every accepted recipe is still parsed from its own source page.
-    let lastError: unknown;
-    for (const candidate of links.slice(0, 5)) {
-      try {
-        return await fetchParsedRecipe(candidate.url, fetcher);
-      } catch (error) {
-        lastError = error;
-      }
-    }
-    if (lastError) throw lastError;
-    throw new Error(`No sourced recipe was found for ${input.dishName}.`);
+  // `silpo.ua/recipes` contains only a small promo carousel. The public API
+  // exposes the actual catalog, letting us fetch just a title-matched source
+  // page instead of silently using an unrelated card.
+  let links: RecipeCatalogLink[];
+  try {
+    links = await listCatalogRecipeLinks(fetcher);
+  } catch {
+    links = await listLandingPageRecipeLinks(fetcher);
   }
+  const candidates = rankRecipeLinks(input.dishName, links);
+  let lastError: unknown;
+  for (const candidate of candidates.slice(0, 5)) {
+    try {
+      return await fetchParsedRecipe(candidate.url, fetcher);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (lastError) throw lastError;
+  throw new Error(`No sourced recipe was found for ${input.dishName}.`);
 }
 
 export async function retrieveRecipeForRequest(
