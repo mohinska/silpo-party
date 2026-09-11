@@ -28,9 +28,9 @@ TOKEN_URL = "https://mcp.silpo.ua/token"
 REGISTER_URL = "https://mcp.silpo.ua/register"
 RESOURCE = "https://mcp.silpo.ua"
 SENSITIVE_KEYS = {"access_token", "refresh_token", "authorization", "mcpaccesstoken", "client_secret", "raw"}
-# The server allows a single agent run for 90 seconds. Keep the local client
-# deadline above it so controlled harness errors can reach the terminal.
-HARNESS_REQUEST_TIMEOUT_SECONDS = 120
+# Keep the local client deadline above the server agent deadline so controlled
+# harness errors can reach the terminal.
+HARNESS_REQUEST_TIMEOUT_SECONDS = 240
 
 
 class HarnessRequestError(RuntimeError):
@@ -87,6 +87,12 @@ def http_error_trace(payload: object) -> list[Mapping[str, Any]]:
     return [redacted for event in trace if isinstance(event, Mapping) if isinstance(redacted := redact(event), Mapping)]
 
 
+def connection_error_detail(error: urllib.error.URLError) -> str:
+    if isinstance(error.reason, ConnectionRefusedError):
+        return "Не вдається підключитися до локального harness. Запусти `npm run dev`."
+    return "Не вдалося виконати HTTP-запит. Перевір локальний dev-сервер і мережеве з’єднання."
+
+
 def json_request(
     url: str,
     body: Mapping[str, Any],
@@ -109,6 +115,8 @@ def json_request(
         detail = code if isinstance(code, str) and code.startswith("HARNESS_") else None
         suffix = f" · {detail}" if detail else ""
         raise HarnessRequestError(f"HTTP {error.code} from {urllib.parse.urlparse(url).netloc}{suffix}", http_error_trace(payload)) from error
+    except urllib.error.URLError as error:
+        raise RuntimeError(connection_error_detail(error)) from error
     if not isinstance(decoded, dict):
         raise RuntimeError("Expected a JSON object response.")
     return decoded

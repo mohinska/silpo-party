@@ -1,14 +1,14 @@
 import io
 import unittest
 from contextlib import redirect_stdout
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
-from scripts.ai_debug_harness import HARNESS_REQUEST_TIMEOUT_SECONDS, authorization_url, http_error_detail, http_error_trace, print_result, redact, require_local_harness_url
+from scripts.ai_debug_harness import HARNESS_REQUEST_TIMEOUT_SECONDS, authorization_url, connection_error_detail, http_error_detail, http_error_trace, print_result, redact, require_local_harness_url
 
 
 class AiDebugHarnessTest(unittest.TestCase):
     def test_local_harness_waits_longer_than_the_agent_deadline(self) -> None:
-        self.assertGreater(HARNESS_REQUEST_TIMEOUT_SECONDS, 90)
+        self.assertGreater(HARNESS_REQUEST_TIMEOUT_SECONDS, 180)
 
     def test_authorization_url_uses_pkce_and_loopback_redirect(self) -> None:
         url = authorization_url(
@@ -42,6 +42,9 @@ class AiDebugHarnessTest(unittest.TestCase):
         trace = http_error_trace({"trace": [{"toolName": "searchProducts", "raw": "private"}, "not-an-event"]})
 
         self.assertEqual(trace, [{"toolName": "searchProducts"}])
+
+    def test_connection_refusal_names_the_local_dev_server(self) -> None:
+        self.assertEqual(connection_error_detail(URLError(ConnectionRefusedError(111, "Connection refused"))), "Не вдається підключитися до локального harness. Запусти `npm run dev`.")
 
     def test_human_report_keeps_candidate_choice_and_cart_details(self) -> None:
         output = io.StringIO()
