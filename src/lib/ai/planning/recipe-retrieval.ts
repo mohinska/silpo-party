@@ -90,10 +90,14 @@ export function parseRecipeDocument(html: string, url: string): Recipe {
   const title = typeof recipeData?.name === "string" ? decodeHtml(recipeData.name) : decodeHtml(pageTitle ?? "").replace(/\s*ᐉ.*$/, "");
   let rawIngredients = Array.isArray(recipeData?.recipeIngredient) ? recipeData.recipeIngredient.filter((item): item is string => typeof item === "string") : [];
   if (!rawIngredients.length) rawIngredients = [...html.matchAll(/<li[^>]+data-autotestid=["']recipes-ingredient-item-\d+["'][^>]*>([\s\S]*?)<\/li>/giu)].map((match) => decodeHtml(match[1]));
-  const ingredients = rawIngredients.map(parseIngredient);
+  // Source pages commonly include seasoning such as “сіль за смаком”. Those
+  // lines are real, but have no purchasable quantity; retain only explicitly
+  // quantified ingredients rather than rejecting an otherwise complete recipe
+  // or inventing an amount for the seasoning.
+  const ingredients = rawIngredients.map(parseIngredient).filter((ingredient): ingredient is NonNullable<ReturnType<typeof parseIngredient>> => ingredient !== undefined);
   const yieldText = Array.isArray(recipeData?.recipeYield) ? String(recipeData.recipeYield[0] ?? "") : String(recipeData?.recipeYield ?? html.match(/на\s+(\d+)\s+порц/iu)?.[1] ?? "");
   const servings = Number(yieldText.match(/\d+/)?.[0]);
-  if (!title || !Number.isInteger(servings) || servings <= 0 || !rawIngredients.length || ingredients.some((item) => !item)) throw new Error("The page does not contain a complete structured recipe; no recipe contents were inferred.");
+  if (!title || !Number.isInteger(servings) || servings <= 0 || !ingredients.length) throw new Error("The page does not contain a complete structured recipe; no recipe contents were inferred.");
   const parsedUrl = new URL(url);
   return RecipeSchema.parse({ id: `recipe:${encodeURIComponent(parsedUrl.href)}`, title, source: { provider: parsedUrl.hostname === "silpo.ua" || parsedUrl.hostname.endsWith(".silpo.ua") ? "silpo" : "publisher", url: parsedUrl.href, title }, baseServings: servings, ingredients });
 }

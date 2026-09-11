@@ -83,6 +83,22 @@ describe("recipe provenance", () => {
     ]);
   });
 
+  it("keeps quantified source ingredients while skipping taste-only notes", () => {
+    const html = `<h1>Карбонара</h1><p>на 2 порції</p><ul>
+      <li data-autotestid="recipes-ingredient-item-0">Спагеті <span>100 г</span></li>
+      <li data-autotestid="recipes-ingredient-item-1">Яйця <span>3 шт</span></li>
+      <li data-autotestid="recipes-ingredient-item-2">Сіль <span>за смаком</span></li>
+      <li data-autotestid="recipes-ingredient-item-3">Перець чорний мелений <span>за смаком</span></li>
+    </ul>`;
+
+    expect(parseRecipeDocument(html, "https://silpo.ua/recipes/karbonara")).toMatchObject({
+      title: "Карбонара", ingredients: [
+        { name: "Спагеті", quantity: 100, unit: "g" },
+        { name: "Яйця", quantity: 3, unit: "piece" },
+      ],
+    });
+  });
+
   it("rejects incomplete pages instead of inferring recipe contents", () => {
     expect(() => parseRecipeDocument("<h1>Паста</h1>", "https://silpo.ua/recipes/pasta")).toThrow(/no recipe contents were inferred/i);
   });
