@@ -33,6 +33,12 @@ SENSITIVE_KEYS = {"access_token", "refresh_token", "authorization", "mcpaccessto
 HARNESS_REQUEST_TIMEOUT_SECONDS = 120
 
 
+class HarnessRequestError(RuntimeError):
+    def __init__(self, message: str, trace: list[Mapping[str, Any]]) -> None:
+        super().__init__(message)
+        self.trace = trace
+
+
 def code_challenge(verifier: str) -> str:
     return base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("utf-8")).digest()).rstrip(b"=").decode("ascii")
 
@@ -72,6 +78,15 @@ def http_error_detail(error: urllib.error.HTTPError) -> str | None:
     return code if isinstance(code, str) and code.startswith("HARNESS_") else None
 
 
+def http_error_trace(payload: object) -> list[Mapping[str, Any]]:
+    if not isinstance(payload, Mapping):
+        return []
+    trace = payload.get("trace")
+    if not isinstance(trace, list):
+        return []
+    return [redacted for event in trace if isinstance(event, Mapping) if isinstance(redacted := redact(event), Mapping)]
+
+
 def json_request(
     url: str,
     body: Mapping[str, Any],
@@ -86,9 +101,14 @@ def json_request(
     except TimeoutError as error:
         raise RuntimeError(f"HTTP-запит не завершився за {timeout_seconds} с.") from error
     except urllib.error.HTTPError as error:
-        detail = http_error_detail(error)
+        try:
+            payload = json.loads(error.read().decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            payload = None
+        code = payload.get("code") if isinstance(payload, Mapping) else None
+        detail = code if isinstance(code, str) and code.startswith("HARNESS_") else None
         suffix = f" · {detail}" if detail else ""
-        raise RuntimeError(f"HTTP {error.code} from {urllib.parse.urlparse(url).netloc}{suffix}") from error
+        raise HarnessRequestError(f"HTTP {error.code} from {urllib.parse.urlparse(url).netloc}{suffix}", http_error_trace(payload)) from error
     if not isinstance(decoded, dict):
         raise RuntimeError("Expected a JSON object response.")
     return decoded
@@ -290,12 +310,17 @@ def run() -> int:
         body: dict[str, Any] = {"message": message, "mcpAccessToken": token}
         if session_id:
             body["sessionId"] = session_id
-        result = json_request(
-            harness_url,
-            body,
-            {"authorization": f"Bearer {secret}"},
-            timeout_seconds=HARNESS_REQUEST_TIMEOUT_SECONDS,
-        )
+        try:
+            result = json_request(
+                harness_url,
+                body,
+                {"authorization": f"Bearer {secret}"},
+                timeout_seconds=HARNESS_REQUEST_TIMEOUT_SECONDS,
+            )
+        except HarnessRequestError as error:
+            print(f"\nПомилка: {error}")
+            print_result({"reply": "Запит перервався; нижче безпечні кроки, що встигли виконатись.", "trace": error.trace, "cart": None})
+            continue
         received_id = result.get("sessionId")
         if isinstance(received_id, str):
             session_id = received_id

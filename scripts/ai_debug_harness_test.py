@@ -3,7 +3,7 @@ import unittest
 from contextlib import redirect_stdout
 from urllib.error import HTTPError
 
-from scripts.ai_debug_harness import HARNESS_REQUEST_TIMEOUT_SECONDS, authorization_url, http_error_detail, print_result, redact, require_local_harness_url
+from scripts.ai_debug_harness import HARNESS_REQUEST_TIMEOUT_SECONDS, authorization_url, http_error_detail, http_error_trace, print_result, redact, require_local_harness_url
 
 
 class AiDebugHarnessTest(unittest.TestCase):
@@ -37,6 +37,11 @@ class AiDebugHarnessTest(unittest.TestCase):
         error = HTTPError("http://localhost:3000/api/ai-debug/harness", 502, "Bad Gateway", None, io.BytesIO(b'{"error":"Harness run failed.","code":"HARNESS_AGENT_FAILED","raw":"private"}'))
 
         self.assertEqual(http_error_detail(error), "HARNESS_AGENT_FAILED")
+
+    def test_http_error_trace_keeps_only_safe_event_objects(self) -> None:
+        trace = http_error_trace({"trace": [{"toolName": "searchProducts", "raw": "private"}, "not-an-event"]})
+
+        self.assertEqual(trace, [{"toolName": "searchProducts"}])
 
     def test_human_report_keeps_candidate_choice_and_cart_details(self) -> None:
         output = io.StringIO()

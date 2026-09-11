@@ -28,6 +28,11 @@ const HarnessFailureCodeSchema = z.enum([
   "HARNESS_CATALOG_FAILED",
   "HARNESS_RUN_FAILED",
 ]);
+const FailureResponseSchema = z.strictObject({
+  error: z.literal("Harness run failed."),
+  code: HarnessFailureCodeSchema,
+  trace: z.array(DebugHarnessTraceSchema).max(100),
+});
 
 function authorized(value: string | null) {
   const secret = process.env.AI_DEBUG_HARNESS_SECRET;
@@ -65,6 +70,6 @@ export async function POST(request: Request) {
     sessions.set(result.sessionId, { session, touchedAt: now });
     return Response.json(result, { status: 200 });
   } catch (error) {
-    return Response.json({ error: "Harness run failed.", code: harnessFailureCode(error) }, { status: 502 });
+    return Response.json(FailureResponseSchema.parse({ error: "Harness run failed.", code: harnessFailureCode(error), trace: session.trace }), { status: 502 });
   }
 }
