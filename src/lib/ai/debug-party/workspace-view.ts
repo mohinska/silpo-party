@@ -22,9 +22,15 @@ export function mapWorkspaceRun(value: unknown) {
 export function mapWorkspaceToolEvent(value: unknown) {
   const row = eventSchema.parse(value);
   // Only an explicitly allowed numeric count crosses the server/client boundary.
-  const metadata = z.object({ count: z.number().int().nonnegative().max(1000000).optional() }).safeParse(row.metadata);
+  const metadata = z.object({
+    count: z.number().int().nonnegative().max(1000000).optional(),
+    mcpTool: z.string().regex(/^silpo_[a-z0-9_]{1,120}$/).optional(),
+    errorCode: z.string().regex(/^[A-Z0-9_-]{1,80}$/).optional(),
+  }).safeParse(row.metadata);
   return { id: row.id, runId: row.run_id, toolName: row.tool_name, status: row.status,
-    durationMs: row.duration_ms, createdAt: row.created_at, count: metadata.success ? metadata.data.count ?? null : null };
+    durationMs: row.duration_ms, createdAt: row.created_at, count: metadata.success ? metadata.data.count ?? null : null,
+    mcpTool: metadata.success ? metadata.data.mcpTool ?? null : null,
+    errorCode: metadata.success ? metadata.data.errorCode ?? null : null };
 }
 
 export function mapWorkspaceSnapshot(value: unknown) {

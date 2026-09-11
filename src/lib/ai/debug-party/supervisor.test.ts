@@ -113,12 +113,37 @@ describe("debug party supervisor", () => {
     await runDebugPartySupervisor({ ...build, mode: "chat", messageId: "message" }, chat.dependencies);
     const names = f.model.doGenerateCalls[0].tools?.map((tool) => tool.name);
     expect(names).toContain("addProduct");
+    expect(names).toContain("resolveRecipe");
     expect(names).not.toContain("writeSilpoCart");
     expect(names).toEqual(chat.model.doGenerateCalls[0].tools?.map((tool) => tool.name));
     expect(first.reply.length).toBeLessThanOrEqual(240);
     expect(first.status).toBe("completed");
     expect(JSON.stringify([first, f.events, f.finishes])).not.toContain("PRIVATE REASONING");
     expect(f.events).toEqual(expect.arrayContaining([expect.objectContaining({ toolName: "complete", status: "completed" })]));
+  });
+
+  it("persists a safe failing Silpo MCP method and code in the debug event", async () => {
+    const f = setup([response("searchProducts", { query: "вода" }), response("complete", { reply: "Пошук тимчасово недоступний." })]);
+    f.dependencies.catalogAdapter = async () => { throw new Error("MCP_READ:silpo_find_products_batch:MCP_503"); };
+
+    await runDebugPartySupervisor(build, f.dependencies);
+
+    expect(f.events).toContainEqual(expect.objectContaining({
+      toolName: "searchProducts", status: "failed", metadata: { mcpTool: "silpo_find_products_batch", errorCode: "MCP_503" },
+    }));
+  });
+
+  it("reads safe MCP metadata from a wrapped upstream error", async () => {
+    const f = setup([response("searchProducts", { query: "вода" }), response("complete", { reply: "Пошук тимчасово недоступний." })]);
+    f.dependencies.catalogAdapter = async () => {
+      throw new Error("Catalog read failed", { cause: new Error("MCP_READ:silpo_find_products_batch:MCP_503") });
+    };
+
+    await runDebugPartySupervisor(build, f.dependencies);
+
+    expect(f.events).toContainEqual(expect.objectContaining({
+      toolName: "searchProducts", status: "failed", metadata: { mcpTool: "silpo_find_products_batch", errorCode: "MCP_503" },
+    }));
   });
 
   it("stops at the step limit without claiming success", async () => {

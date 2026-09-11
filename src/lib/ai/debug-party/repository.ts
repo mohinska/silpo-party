@@ -158,11 +158,11 @@ type RunInsert = {
  * the authorization boundary; all methods on this port are server-only writes.
  */
 export interface DebugPartyPersistencePort {
-  createParty?(actorId: string): Promise<unknown>;
   joinParty?(code: string, actorId: string): Promise<unknown>;
   updateBudget?(input: { partyId: string; actorId: string; budgetCents: number | null }): Promise<void>;
   insertMessage?(input: { partyId: string; actorId: string; content: string }): Promise<unknown>;
   finalizeParty?(partyId: string, actorId: string): Promise<unknown>;
+  clearParty?(partyId: string, actorId: string): Promise<void>;
   insertAssistantReply?(input: { partyId: string; actorId: string; runId: string; content: string }): Promise<void>;
   findWorkspace(code: string, actorId: string): Promise<DebugPartyWorkspaceRow | null>;
   findMembership(partyId: string, participantId: string): Promise<unknown | null>;
@@ -321,11 +321,6 @@ export class DebugPartyRepository {
     await this.persistence.insertAssistantReply({ partyId: party.id, actorId, runId: IdSchema.parse(runId), content: z.string().trim().min(1).max(240).parse(content) });
   }
 
-  async createParty(actorId: string): Promise<string> {
-    if (!this.persistence.createParty) throw new Error("Party creation is unavailable.");
-    return DebugPartySchema.shape.code.parse(await this.persistence.createParty(IdSchema.parse(actorId)));
-  }
-
   async joinParty(code: string, actorId: string): Promise<string> {
     if (!this.persistence.joinParty) throw new Error("Party joining is unavailable.");
     const normalized = DebugPartySchema.shape.code.parse(code.trim().toUpperCase());
@@ -357,6 +352,13 @@ export class DebugPartyRepository {
     if (member.role !== "host" || party.hostId !== actorId) throw new Error("Лише Host може фіналізувати кошик.");
     if (!this.persistence.finalizeParty) throw new Error("Finalization is unavailable.");
     return IdSchema.parse(await this.persistence.finalizeParty(party.id, actorId));
+  }
+
+  async clearParty(code: string, actorId: string): Promise<void> {
+    const { party, member } = await this.loadWorkspace(code, actorId);
+    if (member.role !== "host" || party.hostId !== actorId) throw new Error("Лише Host може очистити вечірку.");
+    if (!this.persistence.clearParty) throw new Error("Party cleanup is unavailable.");
+    await this.persistence.clearParty(party.id, actorId);
   }
 
   async loadWorkspace(code: string, actorId: string): Promise<DebugPartyWorkspace> {
@@ -481,12 +483,6 @@ export async function createDebugPartyRepository(): Promise<DebugPartyRepository
       if (!run) throw new Error("Completed actor run is required.");
       const { error } = await admin.from("debug_chat_messages").insert({ party_id: partyId, participant_id: null, role: "assistant", content, status: "completed" });
       if (error) throw error;
-    },
-    async createParty(actorId) {
-      await requireSession(actorId);
-      const { data, error } = await authenticated.rpc("create_debug_party");
-      if (error) throw error;
-      return data;
     },
     async joinParty(code, actorId) {
       await requireSession(actorId);
@@ -616,6 +612,11 @@ export async function createDebugPartyRepository(): Promise<DebugPartyRepository
       });
       if (error) throw error;
       return data;
+    },
+
+    async clearParty(partyId) {
+      const { error } = await authenticated.rpc("clear_debug_party", { target_party_id: partyId });
+      if (error) throw error;
     },
 
     async updateRun(input) {

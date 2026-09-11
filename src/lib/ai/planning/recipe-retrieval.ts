@@ -98,11 +98,32 @@ export function parseRecipeDocument(html: string, url: string): Recipe {
   return RecipeSchema.parse({ id: `recipe:${encodeURIComponent(parsedUrl.href)}`, title, source: { provider: parsedUrl.hostname === "silpo.ua" || parsedUrl.hostname.endsWith(".silpo.ua") ? "silpo" : "publisher", url: parsedUrl.href, title }, baseServings: servings, ingredients });
 }
 
+function assertPublicRecipeUrl(url: string) {
+  const target = new URL(url);
+  if (target.protocol !== "https:" || target.hostname === "localhost" || target.hostname.endsWith(".local") || /^(127\.|10\.|169\.254\.|192\.168\.|0\.|::1$)/.test(target.hostname)) {
+    throw new Error("Recipe URLs must be public HTTPS pages.");
+  }
+  return target;
+}
+
+async function fetchParsedRecipe(url: string, fetcher: typeof fetch) {
+  assertPublicRecipeUrl(url);
+  const response = await fetcher(url, { cache: "no-store" });
+  if (!response.ok) throw new Error("The recipe source could not be retrieved.");
+  return parseRecipeDocument(await response.text(), response.url || url);
+}
+
 export async function retrieveRecipe(input: { dishName: string; requestedUrl?: string }, fetcher: typeof fetch = fetch): Promise<Recipe> {
-  let url = input.requestedUrl;
-  if (!url) {
-    const search = await fetcher(`https://silpo.ua/recipes?search=${encodeURIComponent(input.dishName)}`, { cache: "no-store" });
-    if (!search.ok) throw new Error("Silpo recipe search is unavailable.");
+  if (input.requestedUrl) {
+    const recipe = await fetchParsedRecipe(input.requestedUrl, fetcher);
+    return recipe.source.provider !== "silpo" ? { ...recipe, source: { ...recipe.source, provider: "participant" } } : recipe;
+  }
+
+  {
+    // The public `?search=` page is not a stable filtered API. Index the
+    // catalog page and rank only its actual recipe links instead.
+    const search = await fetcher("https://silpo.ua/recipes", { cache: "no-store" });
+    if (!search.ok) throw new Error("Silpo recipe index is unavailable.");
     const html = await search.text();
     const words = input.dishName.toLocaleLowerCase("uk-UA").match(/[\p{L}\p{N}]+/gu) ?? [];
     const links = [...html.matchAll(/<a[^>]+href=["'](\/recipes\/[a-z0-9%_-]+)["'][^>]*>([\s\S]*?)<\/a>/giu)].map((match) => ({
@@ -110,15 +131,20 @@ export async function retrieveRecipe(input: { dishName: string; requestedUrl?: s
       title: decodeHtml(match[2]).toLocaleLowerCase("uk-UA"),
     }));
     links.sort((left, right) => words.filter((word) => right.title.includes(word)).length - words.filter((word) => left.title.includes(word)).length || left.url.localeCompare(right.url));
-    url = links[0]?.url;
-    if (!url) throw new Error(`No sourced recipe was found for ${input.dishName}.`);
+    // Catalog cards can point to editorial pages without a complete ingredient
+    // list. Try a small, relevance-ranked set instead of failing on the first
+    // card; every accepted recipe is still parsed from its own source page.
+    let lastError: unknown;
+    for (const candidate of links.slice(0, 5)) {
+      try {
+        return await fetchParsedRecipe(candidate.url, fetcher);
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (lastError) throw lastError;
+    throw new Error(`No sourced recipe was found for ${input.dishName}.`);
   }
-  const target = new URL(url);
-  if (target.protocol !== "https:" || target.hostname === "localhost" || target.hostname.endsWith(".local") || /^(127\.|10\.|169\.254\.|192\.168\.|0\.|::1$)/.test(target.hostname)) throw new Error("Recipe URLs must be public HTTPS pages.");
-  const response = await fetcher(url, { cache: "no-store" });
-  if (!response.ok) throw new Error("The recipe source could not be retrieved.");
-  const recipe = parseRecipeDocument(await response.text(), response.url || url);
-  return input.requestedUrl && recipe.source.provider !== "silpo" ? { ...recipe, source: { ...recipe.source, provider: "participant" } } : recipe;
 }
 
 export async function retrieveRecipeForRequest(

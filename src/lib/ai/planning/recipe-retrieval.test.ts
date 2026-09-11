@@ -92,11 +92,23 @@ describe("recipe provenance", () => {
     const fetcher = vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
       fetched.push(url);
-      if (url.includes("?search=")) return new Response('<a href="/recipes/pica"><span>Шкільна піца</span></a><a href="/recipes/pasta"><span>Паста болоньєзе</span></a>', { status: 200 });
+      if (url === "https://silpo.ua/recipes") return new Response('<a href="/recipes/pica"><span>Шкільна піца</span></a><a href="/recipes/pasta"><span>Паста болоньєзе</span></a>', { status: 200 });
       return new Response('<h1>Паста болоньєзе</h1><p>на 2 порції</p><li data-autotestid="recipes-ingredient-item-0">Паста <span>300 г</span></li>', { status: 200, headers: { "Content-Type": "text/html" } });
     });
     const recipe = await retrieveRecipe({ dishName: "паста" }, fetcher as typeof fetch);
     expect(recipe.title).toBe("Паста болоньєзе");
     expect(fetched[1]).toBe("https://silpo.ua/recipes/pasta");
+  });
+
+  it("tries the next relevant source card when the first one has no complete recipe", async () => {
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === "https://silpo.ua/recipes") return new Response('<a href="/recipes/first"><span>Паста карбонара</span></a><a href="/recipes/second"><span>Паста карбонара класична</span></a>', { status: 200 });
+      if (url.endsWith("/first")) return new Response("<h1>Паста карбонара</h1>", { status: 200 });
+      return new Response('<h1>Паста карбонара класична</h1><p>на 2 порції</p><li data-autotestid="recipes-ingredient-item-0">Паста <span>300 г</span></li>', { status: 200 });
+    });
+
+    await expect(retrieveRecipe({ dishName: "паста карбонара" }, fetcher as typeof fetch)).resolves.toMatchObject({ title: "Паста карбонара класична" });
+    expect(fetcher).toHaveBeenCalledWith("https://silpo.ua/recipes/second", { cache: "no-store" });
   });
 });

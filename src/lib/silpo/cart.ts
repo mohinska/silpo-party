@@ -337,26 +337,30 @@ function verifiedCatalogProducts(data: unknown, context: CartContext): SilpoVeri
   });
 }
 
+function safeMcpErrorCode(error: unknown) {
+  const message = error instanceof Error ? error.message : "";
+  const matched = message.match(/(?:^|\D)(401|403|404|408|409|422|429|500|502|503|504|-32601)(?:\D|$)/);
+  return matched ? `MCP_${matched[1]}` : "MCP_OPERATION_FAILED";
+}
+
 /** Host-scoped read operations only; legacy cart write exports remain separate. */
 export const withSilpoCatalogReader = async <T>(
   hostId: string,
   operation: (reader: SilpoCatalogReader) => Promise<T>,
   beforeRead?: () => void,
-): Promise<T> => withSilpoMcp(hostId, async (client, advertised) => {
-  const tools = new Map([...advertised].slice(0, 200).filter(([, tool]) => {
-    if (tool.annotations?.readOnlyHint === false || tool.annotations?.destructiveHint === true) return false;
-    if (/(?:^|_)(add|remove|delete|update|set|create|checkout|submit|cancel|write)(?:_|$)/i.test(tool.name)) return false;
-    if (!/(?:^|_)(get|find|search|list|read|fetch)(?:_|$)/i.test(tool.name) && tool.annotations?.readOnlyHint !== true) return false;
-    const schema = tool.inputSchema;
-    if (!schema || schema.type !== "object") return false;
-    if (schema.required !== undefined && (!Array.isArray(schema.required) || !schema.required.every((key) => typeof key === "string"))) return false;
-    if (schema.properties !== undefined && !objectValue(schema.properties)) return false;
-    return !["allOf", "anyOf", "oneOf", "$ref", "not", "if"].some((key) => key in schema);
-  }));
+): Promise<T> => {
+  let stage = "silpo_session";
+  return withSilpoMcp(hostId, async (client, advertised) => {
+  // The external annotation is advisory and currently labels
+  // silpo_find_products_batch as non-read-only. This adapter never lets the
+  // model choose an MCP method: it calls only the fixed catalog-read methods
+  // below, so retaining advertised schemas is both safer and compatible.
+  const tools = new Map([...advertised].slice(0, 200));
   // Keep oversized responses and upstream error bodies outside both agent output and logs.
   const readClient = {
     callTool: async (...args: Parameters<Client["callTool"]>) => {
       try {
+        stage = args[0].name;
         beforeRead?.();
         const result = await client.callTool(...args);
         if (result.isError) throw new Error("MCP read failed");
@@ -364,8 +368,10 @@ export const withSilpoCatalogReader = async <T>(
         const text = envelope?.content;
         if (Array.isArray(text) && text.some((entry) => typeof entry.text === "string" && entry.text.length > 100_000)) throw new Error("MCP response too large");
         return { structuredContent: boundedCatalogData(readToolData(result)) };
-      } catch {
-        throw new Error("Silpo catalog read failed.");
+      } catch (error) {
+        // The model and UI get only a method name and stable code, never a raw
+        // response, token, request headers, or account data.
+        throw new Error(`MCP_READ:${args[0].name}:${safeMcpErrorCode(error)}`);
       }
     },
   } as Pick<Client, "callTool">;
@@ -397,7 +403,12 @@ export const withSilpoCatalogReader = async <T>(
       return verifiedCatalogProducts(products.map((entry) => entry.evidence), context);
     },
   });
-});
+  }).catch((error) => {
+    const message = error instanceof Error ? error.message : "";
+    if (message.startsWith("MCP_READ:")) throw error;
+    throw new Error(`MCP_READ:${stage}:${safeMcpErrorCode(error)}`);
+  });
+};
 
 function cartUnitPrice(cart: unknown, productId: string, quantity: number) {
   const queue: unknown[] = [cart];
