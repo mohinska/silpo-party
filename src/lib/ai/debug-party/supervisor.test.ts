@@ -24,7 +24,7 @@ function setup(outputs = [response("complete", { reply: "Кошик готови
   const context = { id: "context", partyId: "party", participantId: "host", intentRevision: 1, contextStatus: "ready" as const,
     purchaseHistoryStatus: "unavailable" as const, dietaryRestrictions: [], favorites: [], recentProducts: [], summary: "Овочі", collectedAt: now, createdAt: now, updatedAt: now };
   const workspace: DebugPartyWorkspace = { party: { id: "party", code: "ABCDEFGH", hostId: "host", status: "ready", budgetCents: 10000, cartRevision: 0, createdAt: now, updatedAt: now },
-    member, members: [member], intents: [{ id: "intent", partyId: "party", participantId: "host", revision: 1, request: "Овочі", createdAt: now, updatedAt: now }], contexts: [context], cartItems: [] };
+    member, members: [member], intents: [{ id: "intent", partyId: "party", participantId: "host", revision: 1, request: "Овочі", createdAt: now, updatedAt: now }], contexts: [context], cartItems: [], recipes: [] };
   const events: unknown[] = [];
   const finishes: unknown[] = [];
   const model = new MockLanguageModelV4({ doGenerate: outputs });
@@ -33,6 +33,11 @@ function setup(outputs = [response("complete", { reply: "Кошик готови
     appendToolEvent: vi.fn(async (event) => { events.push(event); }),
     completeRun: vi.fn(async (event) => { finishes.push(event); }),
     replaceContext: vi.fn(async ({ context: value }) => value),
+    saveRecipe: vi.fn(async ({ recipe }) => {
+      const saved = { id: "recipe-row", ...recipe, createdAt: now, updatedAt: now };
+      workspace.recipes = [...workspace.recipes, saved];
+      return saved;
+    }),
     findEvidence: vi.fn(async () => null), saveEvidence: vi.fn(async ({ evidence }) => evidence), applyCartCommand: vi.fn() };
   const personalAgent = vi.fn(async () => context);
   const dependencies: SupervisorDependencies = { code: "ABCDEFGH", actorId: "host", model,
@@ -135,6 +140,8 @@ describe("debug party supervisor", () => {
     await runDebugPartySupervisor(build, f.dependencies);
 
     expect(normalizer).toHaveBeenCalledWith(expect.objectContaining({ recipe: expect.objectContaining({ title: "Карбонара" }) }));
+    expect(f.repository.saveRecipe).toHaveBeenCalledWith(expect.objectContaining({ recipe: expect.objectContaining({ ingredients: [expect.objectContaining({ name: "Спагеті", quantity: 100, unit: "g" })] }) }));
+    expect(JSON.stringify(f.model.doGenerateCalls[1].prompt)).toContain('"partyRequirements":[{"name":"Спагеті","quantity":100,"unit":"g"');
   });
 
   it("persists a safe failing Silpo MCP method and code in the debug event", async () => {

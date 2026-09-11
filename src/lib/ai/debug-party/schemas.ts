@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { RecipeIngredientSchema } from "../planning/proposal-schemas";
 
 const NonEmptyText = z.string().trim().min(1);
 const BoundedText = NonEmptyText.max(500);
@@ -159,6 +160,18 @@ export const DebugCartSnapshotSchema = z.strictObject({
   items: z.array(DebugCartSnapshotItemSchema).min(1).max(100),
 });
 
+export const DebugRecipeRecordSchema = z.strictObject({
+  id: Id,
+  partyId: Id,
+  recipeId: Id,
+  title: BoundedText,
+  sourceUrl: z.url().nullable(),
+  baseServings: PositiveInteger,
+  ingredients: z.array(RecipeIngredientSchema).min(1).max(100),
+  createdAt: Timestamp,
+  updatedAt: Timestamp,
+});
+
 export const SupervisorRequestSchema = z.discriminatedUnion("mode", [
   z.strictObject({
     mode: z.literal("preprocess"),
@@ -194,4 +207,5 @@ export type DebugProductEvidence = z.infer<typeof DebugProductEvidenceSchema>;
 export type DebugCartItem = z.infer<typeof DebugCartItemSchema>;
 export type DebugCartSnapshotItem = z.infer<typeof DebugCartSnapshotItemSchema>;
 export type DebugCartSnapshot = z.infer<typeof DebugCartSnapshotSchema>;
+export type DebugRecipeRecord = z.infer<typeof DebugRecipeRecordSchema>;
 export type SupervisorRequest = z.infer<typeof SupervisorRequestSchema>;

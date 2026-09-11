@@ -2,6 +2,7 @@ import { ToolLoopAgent, isStepCount, type LanguageModel, type ToolSet } from "ai
 import { z } from "zod";
 import { retrieveRecipe } from "../planning/recipe-retrieval";
 import { createRecipeNormalizer, normalizeRecipeForCart, type RecipeNormalizer } from "../planning/recipe-agent";
+import { mergedRecipeRequirements } from "./recipe-ledger";
 import type { HostCatalogAdapter } from "../../silpo/cart";
 import { createLocalCartTools } from "./cart-tools";
 import { personalMcpAdapter } from "./mcp-tools";
@@ -18,7 +19,7 @@ type PersonalRequest = { participantId: string; foodRequest: DebugFoodIntent; pa
 export type SupervisorDependencies = {
   code: string;
   actorId: string;
-  repository: Pick<DebugPartyRepository, "loadWorkspace" | "startRun" | "appendToolEvent" | "completeRun" | "replaceContext" | "findEvidence" | "saveEvidence" | "applyCartCommand">;
+  repository: Pick<DebugPartyRepository, "loadWorkspace" | "startRun" | "appendToolEvent" | "completeRun" | "replaceContext" | "saveRecipe" | "findEvidence" | "saveEvidence" | "applyCartCommand">;
   model?: LanguageModel;
   environment?: DebugPartyEnvironment;
   personalAgent?: (request: PersonalRequest) => Promise<DebugParticipantContext>;
@@ -56,6 +57,7 @@ Before every addProduct or replaceProduct, obtain current tool evidence via sear
 Use inspectCart after a stale revision. Tools edit only the local cart. You cannot finalize or send a Silpo cart.
 Chat is the primary input. Interpret each participant's ordered messages as cumulative intent: dishes, snacks, drinks and recipe links; add/remove/replace/cheaper requests amend existing intent unless explicitly replaced.
 For an explicit dish or recipe URL, call resolveRecipe before searching products. It returns only sourced, normalized ingredients; do not invent recipe ingredients. Do not call it for direct snack, drink, add/remove, replacement, or cheaper-product requests.
+recipeRequirements are the party-wide, already merged requirements from every saved recipe. After resolveRecipe, use partyRequirements and the current cart to buy only the missing quantity; do not independently re-add ingredients from an earlier recipe. Quantities are normalized to g, ml, or pieces when possible.
 In chat mode apply the latest message incrementally against the current cart. Do not recreate existing items or undo earlier removals. In build mode reconcile the whole current cart with all participant intent histories.
 Silent members do not block planning. Available contexts and current intent histories are authoritative planning data. Ask briefly when a recipe link or request lacks enough verified information; never pretend to have fetched a link.
 In preprocess mode, prepareParticipantContext is mandatory before completion.
@@ -75,6 +77,7 @@ function compactState(state: DebugPartyWorkspace) {
       id: item.id, productId: item.productId, name: item.name, quantity: item.quantity,
       unitPriceCents: item.unitPriceCents, unit: item.unit,
     })),
+    recipeRequirements: mergedRecipeRequirements(state.recipes),
   };
 }
 
@@ -168,6 +171,7 @@ export async function runDebugPartySupervisor(input: unknown, dependencies: Supe
     findEvidence: async (...args: Parameters<typeof repository.findEvidence>) => { checkActive(); const value = await repository.findEvidence(...args); checkActive(); return value; },
     saveEvidence: async (...args: Parameters<typeof repository.saveEvidence>) => { checkActive(); return repository.saveEvidence(...args); },
     applyCartCommand: async (...args: Parameters<typeof repository.applyCartCommand>) => { checkActive(); return repository.applyCartCommand(...args); },
+    saveRecipe: async (...args: Parameters<typeof repository.saveRecipe>) => { checkActive(); const value = await repository.saveRecipe(...args); checkActive(); return value; },
   };
   const catalogAdapter: HostCatalogAdapter = async (hostId, operation) => {
     if (dependencies.catalogAdapter) {
@@ -215,9 +219,17 @@ export async function runDebugPartySupervisor(input: unknown, dependencies: Supe
     execute: async ({ query, url }: { query: string; url?: string }) => {
       const recipe = await retrieveRecipe({ dishName: query, requestedUrl: url });
       const normalized = await normalizeRecipeForCart(recipe, dependencies.recipeNormalizer ?? createRecipeNormalizer(dependencies.environment));
+      const saved = await repository.saveRecipe({
+        partyId: request.partyId, actorId, recipe: {
+          partyId: request.partyId, recipeId: normalized.id, title: normalized.title, sourceUrl: normalized.source.url ?? null,
+          baseServings: normalized.baseServings, ingredients: normalized.ingredients,
+        },
+      });
+      const refreshed = await repository.loadWorkspace(code, actorId);
       return {
-        title: normalized.title, sourceUrl: normalized.source.url ?? null, servings: normalized.baseServings,
+        recipeId: saved.recipeId, title: normalized.title, sourceUrl: normalized.source.url ?? null, servings: normalized.baseServings,
         ingredients: normalized.ingredients.slice(0, 50).map(({ name, quantity, unit }) => ({ name, quantity, unit })),
+        partyRequirements: mergedRecipeRequirements(refreshed.recipes),
       };
     },
   };

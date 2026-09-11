@@ -4,7 +4,9 @@ import { mapWorkspaceRun, mapWorkspaceToolEvent, mapWorkspaceSnapshot, SendStatu
 import {
   DebugCartItemSchema,
   DebugChatMessageSchema,
+  DebugRecipeRecordSchema,
   type DebugChatMessage,
+  type DebugRecipeRecord,
   DebugFoodIntentSchema,
   DebugParticipantContextSchema,
   DebugPartyMemberSchema,
@@ -74,6 +76,7 @@ const ReplaceContextSchema = z.strictObject({
   participantId: IdSchema,
   context: DebugParticipantContextSchema,
 });
+const SaveRecipeSchema = z.strictObject({ partyId: IdSchema, actorId: IdSchema, recipe: DebugRecipeRecordSchema.omit({ id: true, createdAt: true, updatedAt: true }) });
 
 const CompleteRunSchema = z.strictObject({
   partyId: IdSchema,
@@ -106,6 +109,7 @@ export type ApplyCartCommandResult = z.infer<typeof CartCommandResultSchema>;
 export type StartRunInput = z.infer<typeof StartRunSchema>;
 export type AppendToolEventInput = z.infer<typeof ToolEventSchema>;
 export type ReplaceContextInput = z.infer<typeof ReplaceContextSchema>;
+export type SaveRecipeInput = z.infer<typeof SaveRecipeSchema>;
 export type CompleteRunInput = z.infer<typeof CompleteRunSchema>;
 export type DebugAgentRun = z.infer<typeof DebugAgentRunSchema>;
 
@@ -120,6 +124,7 @@ export type DebugPartyWorkspace = {
   members: DebugPartyMember[];
   intents: DebugFoodIntent[];
   contexts: DebugParticipantContext[];
+  recipes: DebugRecipeRecord[];
   cartItems: DebugCartItem[];
   chatMessages?: DebugChatMessage[];
   cartStale?: boolean;
@@ -134,6 +139,7 @@ export type DebugPartyWorkspaceRow = {
   members: unknown[];
   intents: unknown[];
   contexts: unknown[];
+  recipes?: unknown[];
   cartItems: unknown[];
   chatMessages?: unknown[];
   runs?: unknown[];
@@ -162,6 +168,7 @@ export interface DebugPartyPersistencePort {
   updateBudget?(input: { partyId: string; actorId: string; budgetCents: number | null }): Promise<void>;
   insertMessage?(input: { partyId: string; actorId: string; content: string }): Promise<unknown>;
   finalizeParty?(partyId: string, actorId: string): Promise<unknown>;
+  upsertRecipe?(input: SaveRecipeInput): Promise<unknown>;
   clearParty?(partyId: string, actorId: string): Promise<void>;
   insertAssistantReply?(input: { partyId: string; actorId: string; runId: string; content: string }): Promise<void>;
   findWorkspace(code: string, actorId: string): Promise<DebugPartyWorkspaceRow | null>;
@@ -243,6 +250,14 @@ function mapContext(value: unknown): DebugParticipantContext {
     collectedAt: row.collected_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  });
+}
+
+function mapRecipe(value: unknown): DebugRecipeRecord {
+  const row = object(value, "Recipe record");
+  return DebugRecipeRecordSchema.parse({
+    id: row.id, partyId: row.party_id, recipeId: row.recipe_id, title: row.title, sourceUrl: row.source_url,
+    baseServings: row.base_servings, ingredients: row.ingredients, createdAt: row.created_at, updatedAt: row.updated_at,
   });
 }
 
@@ -376,6 +391,7 @@ export class DebugPartyRepository {
       members,
       intents: workspace.intents.map(mapIntent),
       contexts: workspace.contexts.map(mapContext),
+      recipes: (workspace.recipes ?? []).map(mapRecipe),
       cartItems: workspace.cartItems.map(mapCartItem),
       chatMessages: (workspace.chatMessages ?? []).map(mapMessage),
       cartStale: z.boolean().parse(object(workspace.party, "Party").cart_stale ?? false),
@@ -411,6 +427,15 @@ export class DebugPartyRepository {
       throw new Error("Контекст не відповідає учаснику вечірки.");
     }
     return mapContext(await this.persistence.upsertContext(parsed));
+  }
+
+  async saveRecipe(input: SaveRecipeInput): Promise<DebugRecipeRecord> {
+    const parsed = SaveRecipeSchema.parse(input);
+    await this.requireMembership(parsed.partyId, parsed.actorId);
+    if (!this.persistence.upsertRecipe) throw new Error("Recipe ledger is unavailable.");
+    const saved = mapRecipe(await this.persistence.upsertRecipe(parsed));
+    if (saved.partyId !== parsed.partyId || saved.recipeId !== parsed.recipe.recipeId) throw new Error("Recipe ledger identity mismatch.");
+    return saved;
   }
 
   async applyCartCommand(input: ApplyCartCommandInput): Promise<ApplyCartCommandResult> {
@@ -518,10 +543,11 @@ export async function createDebugPartyRepository(): Promise<DebugPartyRepository
       if (!party) return null;
 
       const partyId = String(party.id);
-      const [membersResult, intentsResult, contextsResult, cartItemsResult, messagesResult, runsResult, eventsResult, snapshotResult, sendResult] = await Promise.all([
+      const [membersResult, intentsResult, contextsResult, recipesResult, cartItemsResult, messagesResult, runsResult, eventsResult, snapshotResult, sendResult] = await Promise.all([
         authenticated.from("debug_party_members").select("party_id, participant_id, role, context_status, joined_at, updated_at").eq("party_id", partyId),
         authenticated.from("debug_food_intents").select("id, party_id, participant_id, request, revision, created_at, updated_at").eq("party_id", partyId),
         authenticated.from("debug_participant_contexts").select("id, party_id, participant_id, intent_revision, context_status, purchase_history_status, dietary_restrictions, favorites, recent_products, summary, collected_at, created_at, updated_at").eq("party_id", partyId),
+        authenticated.from("debug_recipe_records").select("id, party_id, recipe_id, title, source_url, base_servings, ingredients, created_at, updated_at").eq("party_id", partyId).order("created_at", { ascending: true }),
         authenticated.from("debug_cart_items").select("id, party_id, product_id, company_id, branch_id, name, quantity, unit, unit_price_cents, discount_cents, image_url, evidence_id, observed_at, introduced_revision, created_at, updated_at").eq("party_id", partyId),
         authenticated.from("debug_chat_messages").select("id, party_id, participant_id, role, content, status, created_at, updated_at").eq("party_id", partyId).order("created_at", { ascending: false }).order("id", { ascending: false }).limit(200),
         authenticated.from("debug_agent_runs").select("id, actor_id, mode, status, created_at").eq("party_id", partyId).order("created_at", { ascending: false }).limit(50),
@@ -529,7 +555,7 @@ export async function createDebugPartyRepository(): Promise<DebugPartyRepository
         authenticated.from("debug_cart_snapshots").select("id, party_id, cart_revision, total_cents, finalized_at").eq("party_id", partyId).maybeSingle(),
         authenticated.from("debug_send_runs").select("status").eq("party_id", partyId).order("created_at", { ascending: false }).limit(1).maybeSingle(),
       ]);
-      for (const result of [membersResult, intentsResult, contextsResult, cartItemsResult, messagesResult, runsResult, eventsResult, snapshotResult, sendResult]) {
+      for (const result of [membersResult, intentsResult, contextsResult, recipesResult, cartItemsResult, messagesResult, runsResult, eventsResult, snapshotResult, sendResult]) {
         if (result.error) throw result.error;
       }
       const members = membersResult.data ?? [];
@@ -540,7 +566,7 @@ export async function createDebugPartyRepository(): Promise<DebugPartyRepository
         if (items.error) throw items.error;
         snapshot = { ...snapshotResult.data, items: items.data ?? [] };
       }
-      return { party, members, intents: intentsResult.data ?? [], contexts: contextsResult.data ?? [], cartItems: cartItemsResult.data ?? [],
+      return { party, members, intents: intentsResult.data ?? [], contexts: contextsResult.data ?? [], recipes: recipesResult.data ?? [], cartItems: cartItemsResult.data ?? [],
         chatMessages: [...(messagesResult.data ?? [])].reverse(), runs: runsResult.data ?? [],
         toolEvents: [...(eventsResult.data ?? [])].reverse(), snapshot, sendStatus: sendResult.data?.status ?? null };
     },
@@ -599,6 +625,15 @@ export async function createDebugPartyRepository(): Promise<DebugPartyRepository
         collected_at: context.collectedAt,
         updated_at: new Date().toISOString(),
       }, { onConflict: "party_id,participant_id" }).select("id, party_id, participant_id, intent_revision, context_status, purchase_history_status, dietary_restrictions, favorites, recent_products, summary, collected_at, created_at, updated_at").single();
+      if (error) throw error;
+      return data;
+    },
+
+    async upsertRecipe({ partyId, recipe }) {
+      const { data, error } = await admin.from("debug_recipe_records").upsert({
+        party_id: partyId, recipe_id: recipe.recipeId, title: recipe.title, source_url: recipe.sourceUrl,
+        base_servings: recipe.baseServings, ingredients: recipe.ingredients, updated_at: new Date().toISOString(),
+      }, { onConflict: "party_id,recipe_id" }).select("id, party_id, recipe_id, title, source_url, base_servings, ingredients, created_at, updated_at").single();
       if (error) throw error;
       return data;
     },
