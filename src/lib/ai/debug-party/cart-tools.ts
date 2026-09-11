@@ -141,11 +141,16 @@ export function createLocalCartTools(context: LocalCartToolsContext) {
       savedGroups.push({ query: group.query, products: saved });
     }
     const allSaved = savedGroups.flatMap((group) => group.products);
+    const selection = context.selectionContext?.();
+    const targets = `Catalog targets for this batch: ${queries.join(" | ")}`;
+    const requestPrefix = "Party request: ";
+    const baseRequest = selection?.request ?? `Товари за запитом: ${queries.join(", ")}`;
+    const preselectionRequest = `${requestPrefix}${baseRequest.slice(0, Math.max(1, 2_000 - requestPrefix.length - targets.length - 1))}\n${targets}`;
     const preselection = allSaved.length
       ? await preselectCandidates({
-        request: context.selectionContext?.().request ?? `Товари за запитом: ${queries.join(", ")}`,
+        request: preselectionRequest,
         queries,
-        constraints: context.selectionContext?.().constraints ?? { dietaryRestrictions: [], favorites: [], recentProductNames: [] },
+        constraints: selection?.constraints ?? { dietaryRestrictions: [], favorites: [], recentProductNames: [] },
         candidates: allSaved.map((entry) => ({
           evidenceId: entry.id, productId: entry.productId, name: entry.name, unit: entry.unit,
           unitPriceCents: entry.unitPriceCents, discountCents: entry.discountCents, available: entry.available, source: entry.source,

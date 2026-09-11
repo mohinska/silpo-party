@@ -120,7 +120,7 @@ describe("AI Debug local harness", () => {
       }),
     } as never);
 
-    expect(candidatePreselector).toHaveBeenCalledWith(expect.objectContaining({ request: "додай воду" }));
+    expect(candidatePreselector).toHaveBeenCalledWith(expect.objectContaining({ request: expect.stringContaining("Catalog targets for this batch: вода") }));
     expect(result.trace[0].trace?.preselection).toMatchObject({ status: "completed" });
     expect(result.trace[0].trace?.candidates[0]?.preselection).toMatchObject({ verdict: "match" });
     expect(JSON.stringify(result)).not.toMatch(/never-return|access_token|authorization|raw/i);

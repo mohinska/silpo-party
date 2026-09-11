@@ -1,9 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { createLocalCartTools, rankCandidates } from "./cart-tools";
+import { createLocalCartTools, rankCandidates, type LocalCartToolsContext } from "./cart-tools";
 import { DebugPartyRepository, type DebugPartyPersistencePort } from "./repository";
 import type { DebugProductEvidence } from "./schemas";
 import type { HostCatalogAdapter, SilpoVerifiedProduct } from "../../silpo/cart";
-import type { CandidatePreselector } from "./candidate-preselector";
 
 vi.mock("server-only", () => ({}));
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: vi.fn() }));
@@ -17,7 +16,7 @@ const product = (productId = "milk", discountCents: number | null = null): Silpo
 });
 const dbRow = (input: object) => Object.fromEntries(Object.entries(input).map(([key, value]) => [key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`), value]));
 
-function setup(products = [product()], options: { candidatePreselector?: CandidatePreselector } = {}) {
+function setup(products = [product()], options: Pick<LocalCartToolsContext, "candidatePreselector" | "selectionContext"> = {}) {
   let revision = 2;
   const evidence = new Map<string, object>();
   const items: Record<string, unknown>[] = [];
@@ -87,6 +86,28 @@ describe("verified local cart tools", () => {
     const result = await fixture.tools.searchProducts.execute({ queries: ["молоко"] });
     expect(result.groups[0].products).toHaveLength(2);
     expect(result.groups[0].preselection.status).toBe("invalid");
+  });
+
+  it("gives the preselector the concrete catalog targets alongside the party request", async () => {
+    let observedRequest = "";
+    const fixture = setup([product("spaghetti")], {
+      selectionContext: () => ({
+        request: "паста карбонара на 2",
+        constraints: { dietaryRestrictions: [], favorites: [], recentProductNames: [] },
+      }),
+      candidatePreselector: async ({ request, candidates }) => {
+        observedRequest = request;
+        return {
+          normalizedIntent: { productKind: "спагеті", requestedAttributes: [], exclusions: [] },
+          verdicts: candidates.map((candidate) => ({ evidenceId: candidate.evidenceId, verdict: "match" as const, reason: "Спагеті." })),
+        };
+      },
+    });
+
+    await fixture.tools.searchProducts.execute({ queries: ["спагеті", "яйця"] });
+
+    expect(observedRequest).toContain("Catalog targets for this batch: спагеті | яйця");
+    expect(observedRequest).toContain("Party request: паста карбонара на 2");
   });
 
   it("keeps every bounded MCP candidate and exposes its median-price context", async () => {

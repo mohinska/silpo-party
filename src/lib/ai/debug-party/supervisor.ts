@@ -80,6 +80,7 @@ Use inspectCart after a stale revision. Tools edit only the local cart. You cann
 Chat is the primary input. Interpret each participant's ordered messages as cumulative intent: dishes, snacks, drinks and recipe links; add/remove/replace/cheaper requests amend existing intent unless explicitly replaced.
 For an explicit dish or recipe URL, call resolveRecipe before searching products. It returns only sourced, normalized ingredients; do not invent recipe ingredients. Do not call it for direct snack, drink, add/remove, replacement, or cheaper-product requests.
 recipeRequirements are the party-wide, already merged requirements from every saved recipe. After resolveRecipe, use partyRequirements and the current cart to buy only the missing quantity; do not independently re-add ingredients from an earlier recipe. Quantities are normalized to g, ml, or pieces when possible.
+A recipe is not ready when only some required ingredients were added. Before complete, explicitly name every required ingredient that remains unavailable after alternate searches; never call that partial basket ready.
 In chat mode apply the latest message incrementally against the current cart. Do not recreate existing items or undo earlier removals. In build mode reconcile the whole current cart with all participant intent histories.
 Silent members do not block planning. Available contexts and current intent histories are authoritative planning data. Ask briefly when a recipe link or request lacks enough verified information; never pretend to have fetched a link.
 In preprocess mode, prepareParticipantContext is mandatory before completion.
@@ -244,7 +245,7 @@ export async function runDebugPartySupervisor(input: unknown, dependencies: Supe
     return { status: "ready", summary: result.summary };
   }
   const complete = {
-    description: "Complete this turn with a short Ukrainian reply.",
+    description: "Complete this turn with a short Ukrainian reply. For a sourced recipe, never say it is ready if a non-optional requirement was not added after alternate searches; explicitly name the unavailable requirements.",
     inputSchema: z.strictObject({ reply: z.string().trim().min(1).max(500) }),
     execute: async (input: { reply: string }) => {
       checkActive();
