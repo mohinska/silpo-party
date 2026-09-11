@@ -10,6 +10,7 @@ const RecipeRequestHeaders = {
   "Accept-Language": "uk-UA,uk;q=0.9,en;q=0.8",
 };
 const SilpoRecipeCatalogUrl = "https://sf-ecom-api.silpo.ua/v1/recipes";
+const SilpoRecipeDetailUrl = "https://sf-ecom-api.silpo.ua/v1/recipe";
 const RecipeCatalogPageSize = 50;
 const RecipeCatalogCacheMs = 5 * 60 * 1_000;
 const RecipeCatalogPageSchema = z.object({
@@ -18,6 +19,19 @@ const RecipeCatalogPageSchema = z.object({
     slug: z.string().regex(/^[a-z0-9-]{1,200}$/),
     title: z.string().trim().min(1).max(300),
   })).max(RecipeCatalogPageSize),
+});
+const RecipeCatalogDetailSchema = z.object({
+  id: z.string().trim().min(1).max(200),
+  slug: z.string().regex(/^[a-z0-9-]{1,200}$/),
+  title: z.string().trim().min(1).max(300),
+  amount: z.number().int().positive().max(100),
+  ingredients: z.array(z.object({
+    name: z.string().trim().min(1).max(160),
+    measure: z.object({
+      quantity: z.number().finite().nonnegative(),
+      unit: z.string().trim().min(1).max(40),
+    }),
+  })).min(1).max(100),
 });
 type RecipeCatalogLink = { readonly url: string; readonly title: string };
 
@@ -170,6 +184,30 @@ async function fetchRecipeCatalogPage(offset: number, fetcher: typeof fetch) {
   return parsed.data;
 }
 
+async function fetchCatalogRecipe(link: RecipeCatalogLink, fetcher: typeof fetch): Promise<Recipe> {
+  const slug = new URL(link.url).pathname.split("/").at(-1);
+  if (!slug || !/^[a-z0-9-]{1,200}$/.test(slug)) throw new Error("Recipe catalog returned an invalid recipe slug.");
+  const response = await fetcher(`${SilpoRecipeDetailUrl}/${slug}`, {
+    cache: "no-store",
+    headers: { ...RecipeRequestHeaders, Accept: "application/json" },
+  });
+  if (!response.ok) throw new Error("The recipe source could not be retrieved.");
+  const parsed = RecipeCatalogDetailSchema.safeParse(await response.json());
+  if (!parsed.success) throw new Error("The recipe source returned invalid data.");
+  const ingredients = parsed.data.ingredients.flatMap((ingredient) => {
+    if (ingredient.measure.quantity <= 0) return [];
+    const parsedIngredient = parseIngredient(`${ingredient.name} ${ingredient.measure.quantity} ${ingredient.measure.unit}`);
+    return parsedIngredient ? [parsedIngredient] : [];
+  });
+  return RecipeSchema.parse({
+    id: `recipe:${encodeURIComponent(link.url)}`,
+    title: parsed.data.title,
+    source: { provider: "silpo", title: parsed.data.title, url: link.url },
+    baseServings: parsed.data.amount,
+    ingredients,
+  });
+}
+
 async function listCatalogRecipeLinks(fetcher: typeof fetch): Promise<RecipeCatalogLink[]> {
   if (fetcher === fetch && recipeCatalogCache && recipeCatalogCache.expiresAt > Date.now()) return recipeCatalogCache.links;
   const first = await fetchRecipeCatalogPage(0, fetcher);
@@ -201,16 +239,20 @@ export async function retrieveRecipe(input: { dishName: string; requestedUrl?: s
   // exposes the actual catalog, letting us fetch just a title-matched source
   // page instead of silently using an unrelated card.
   let links: RecipeCatalogLink[];
+  let catalogAvailable = true;
   try {
     links = await listCatalogRecipeLinks(fetcher);
   } catch {
+    catalogAvailable = false;
     links = await listLandingPageRecipeLinks(fetcher);
   }
   const candidates = rankRecipeLinks(input.dishName, links);
   let lastError: unknown;
   for (const candidate of candidates.slice(0, 5)) {
     try {
-      return await fetchParsedRecipe(candidate.url, fetcher);
+      return catalogAvailable
+        ? await fetchCatalogRecipe(candidate, fetcher)
+        : await fetchParsedRecipe(candidate.url, fetcher);
     } catch (error) {
       lastError = error;
     }

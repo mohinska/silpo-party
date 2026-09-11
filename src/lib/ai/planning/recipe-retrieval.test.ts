@@ -149,22 +149,31 @@ describe("recipe provenance", () => {
       const url = String(input);
       if (url === "https://sf-ecom-api.silpo.ua/v1/recipes?limit=50&offset=0") {
         return Response.json({
-          limit: 50, offset: 0, total: 2,
+          limit: 50, offset: 0, total: 3,
           items: [
             { slug: "pasta-bolonieze", title: "Паста болоньєзе" },
+            { slug: "pasta-putaneska", title: "Паста путанеска" },
             { slug: "karbonara", title: "Карбонара" },
           ],
         });
       }
-      if (url === "https://silpo.ua/recipes/karbonara") {
-        return new Response('<h1>Карбонара</h1><p>на 2 порції</p><li data-autotestid="recipes-ingredient-item-0">Спагеті <span>200 г</span></li>', { status: 200 });
+      if (url === "https://sf-ecom-api.silpo.ua/v1/recipe/karbonara") {
+        return Response.json({
+          id: "recipe", slug: "karbonara", title: "Карбонара", amount: 2,
+          ingredients: [
+            { name: "Спагеті", measure: { quantity: 200, unit: "г" } },
+            { name: "Сіль", measure: { quantity: 0, unit: "за смаком" } },
+          ],
+        });
       }
       throw new Error(`Unexpected recipe URL: ${url}`);
     });
 
     await expect(retrieveRecipe({ dishName: "паста карбонара" }, fetcher as typeof fetch)).resolves.toMatchObject({
       title: "Карбонара",
+      baseServings: 2,
       source: { url: "https://silpo.ua/recipes/karbonara" },
+      ingredients: [{ name: "Спагеті", quantity: 200, unit: "g" }],
     });
   });
 });
