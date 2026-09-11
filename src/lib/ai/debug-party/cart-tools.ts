@@ -32,7 +32,7 @@ export type LocalCartToolsContext = {
   catalogGateway?: Pick<DebugCatalogGateway, "search" | "inspect">;
   catalogAdapter?: HostCatalogAdapter;
   candidatePreselector?: CandidatePreselector;
-  selectionContext?: {
+  selectionContext?: () => {
     request: string;
     constraints: {
       dietaryRestrictions: string[];
@@ -143,9 +143,9 @@ export function createLocalCartTools(context: LocalCartToolsContext) {
     const allSaved = savedGroups.flatMap((group) => group.products);
     const preselection = allSaved.length
       ? await preselectCandidates({
-        request: context.selectionContext?.request ?? `Товари за запитом: ${queries.join(", ")}`,
+        request: context.selectionContext?.().request ?? `Товари за запитом: ${queries.join(", ")}`,
         queries,
-        constraints: context.selectionContext?.constraints ?? { dietaryRestrictions: [], favorites: [], recentProductNames: [] },
+        constraints: context.selectionContext?.().constraints ?? { dietaryRestrictions: [], favorites: [], recentProductNames: [] },
         candidates: allSaved.map((entry) => ({
           evidenceId: entry.id, productId: entry.productId, name: entry.name, unit: entry.unit,
           unitPriceCents: entry.unitPriceCents, discountCents: entry.discountCents, available: entry.available, source: entry.source,
