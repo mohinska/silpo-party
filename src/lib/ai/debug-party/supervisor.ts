@@ -1,6 +1,7 @@
 import { ToolLoopAgent, isStepCount, type LanguageModel, type ToolSet } from "ai";
 import { z } from "zod";
 import { retrieveRecipe } from "../planning/recipe-retrieval";
+import { createRecipeNormalizer, normalizeRecipeForCart, type RecipeNormalizer } from "../planning/recipe-agent";
 import type { HostCatalogAdapter } from "../../silpo/cart";
 import { createLocalCartTools } from "./cart-tools";
 import { personalMcpAdapter } from "./mcp-tools";
@@ -21,6 +22,7 @@ export type SupervisorDependencies = {
   model?: LanguageModel;
   environment?: DebugPartyEnvironment;
   personalAgent?: (request: PersonalRequest) => Promise<DebugParticipantContext>;
+  recipeNormalizer?: RecipeNormalizer;
   catalogAdapter?: HostCatalogAdapter;
   loadMessage?: (messageId: string) => Promise<{ partyId: string; actorId: string; content: string } | null>;
 };
@@ -212,9 +214,10 @@ export async function runDebugPartySupervisor(input: unknown, dependencies: Supe
     inputSchema: z.strictObject({ query: z.string().trim().min(1).max(200), url: z.url().optional() }),
     execute: async ({ query, url }: { query: string; url?: string }) => {
       const recipe = await retrieveRecipe({ dishName: query, requestedUrl: url });
+      const normalized = await normalizeRecipeForCart(recipe, dependencies.recipeNormalizer ?? createRecipeNormalizer(dependencies.environment));
       return {
-        title: recipe.title, sourceUrl: recipe.source.url ?? null, servings: recipe.baseServings,
-        ingredients: recipe.ingredients.slice(0, 50).map(({ name, quantity, unit }) => ({ name, quantity, unit })),
+        title: normalized.title, sourceUrl: normalized.source.url ?? null, servings: normalized.baseServings,
+        ingredients: normalized.ingredients.slice(0, 50).map(({ name, quantity, unit }) => ({ name, quantity, unit })),
       };
     },
   };
