@@ -1,5 +1,8 @@
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
+import { generateText } from "ai";
 import { resolvePlanningProviderConfig } from "../planning/provider";
+import { CANDIDATE_PRESELECTOR_PROMPT } from "./prompts";
+import type { CandidatePreselector } from "./candidate-preselector";
 
 export type DebugPartyEnvironment = Record<string, string | undefined>;
 
@@ -11,6 +14,22 @@ export function createDebugPartyModel(environment: DebugPartyEnvironment = proce
     baseURL: config.baseUrl,
     supportsStructuredOutputs: false,
   })(config.plannerModel);
+}
+
+/** The only LLM boundary used by the catalog preselector; its output is still checked by Zod and evidence coverage. */
+export function createDebugCandidatePreselector(environment: DebugPartyEnvironment = process.env): CandidatePreselector {
+  return async (input) => {
+    const config = resolvePlanningProviderConfig(environment);
+    const model = createOpenAICompatible({
+      name: config.provider,
+      apiKey: config.apiKey,
+      baseURL: config.baseUrl,
+      supportsStructuredOutputs: false,
+      transformRequestBody: (body) => ({ ...body, response_format: { type: "json_object" } }),
+    })(config.plannerModel);
+    const result = await generateText({ model, system: CANDIDATE_PRESELECTOR_PROMPT, prompt: JSON.stringify(input) });
+    return JSON.parse(result.text) as unknown;
+  };
 }
 
 export function resolveDebugPartyLimits(environment: DebugPartyEnvironment = process.env) {

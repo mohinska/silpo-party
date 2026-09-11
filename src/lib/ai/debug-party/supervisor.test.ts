@@ -4,6 +4,7 @@ import type { LanguageModelV4GenerateResult } from "@ai-sdk/provider";
 import { runDebugPartySupervisor, type SupervisorDependencies } from "./supervisor";
 import type { DebugPartyWorkspace } from "./repository";
 import { readToolData } from "../../silpo/tool-data";
+import type { CandidatePreselector } from "./candidate-preselector";
 
 const { rawCall, withMcp, openMcp, retrieveRecipe } = vi.hoisted(() => ({ rawCall: vi.fn(), withMcp: vi.fn(), openMcp: vi.fn(), retrieveRecipe: vi.fn() }));
 vi.mock("server-only", () => ({}));
@@ -49,6 +50,30 @@ function setup(outputs = [response("complete", { reply: "Кошик готови
 const build = { mode: "build", partyId: "party", actorId: "host" };
 
 describe("debug party supervisor", () => {
+  it("passes compact planning context to the candidate preselector", async () => {
+    const f = setup([response("searchProducts", { queries: ["вода"] }), response("complete", { reply: "Воду знайдено." })]);
+    f.dependencies.catalogAdapter = async (_host, operation) => operation({
+      search: async () => [{ productId: "water", companyId: "company", branchId: "branch", name: "Вода негазована", unit: "1 л", unitPriceCents: 3000, discountCents: null, imageUrl: null, available: true }],
+      inspect: async () => [],
+    });
+    const candidatePreselector = vi.fn<CandidatePreselector>(async ({ candidates }) => ({
+      normalizedIntent: { productKind: "вода", requestedAttributes: [], exclusions: [] },
+      verdicts: candidates.map((candidate) => ({ evidenceId: candidate.evidenceId, verdict: "match" as const, reason: "Питна вода." })),
+    }));
+    (f.dependencies as SupervisorDependencies & { candidatePreselector: CandidatePreselector }).candidatePreselector = candidatePreselector;
+
+    await runDebugPartySupervisor(build, f.dependencies);
+
+    expect(candidatePreselector).toHaveBeenCalledWith(expect.objectContaining({
+      request: expect.stringContaining("Овочі"),
+      candidates: [expect.objectContaining({ evidenceId: expect.any(String), productId: "water" })],
+    }));
+    expect(JSON.stringify(candidatePreselector.mock.calls)).not.toMatch(/access_token|authorization|raw/i);
+    const searchEvent = f.events.find((entry): entry is { metadata: { trace?: { preselection?: { status: string } } } } => typeof entry === "object" && entry !== null
+      && "toolName" in entry && entry.toolName === "searchProducts" && "status" in entry && entry.status === "completed");
+    expect(searchEvent?.metadata.trace?.preselection).toMatchObject({ status: "completed" });
+  });
+
   it("requires personal preprocessing, persists context, and never exposes cart tools in preprocess", async () => {
     const f = setup([response("prepareParticipantContext"), response("complete", { reply: "Контекст готовий." })]);
     const result = await runDebugPartySupervisor({ mode: "preprocess", partyId: "party", participantId: "host", intentRevision: 1 }, f.dependencies);
@@ -122,6 +147,7 @@ describe("debug party supervisor", () => {
     expect(names).toContain("resolveRecipe");
     expect(names).not.toContain("writeSilpoCart");
     expect(names).toEqual(chat.model.doGenerateCalls[0].tools?.map((tool) => tool.name));
+    expect(JSON.stringify(f.model.doGenerateCalls[0].prompt)).toContain("unitPriceCents is the final payable price");
     expect(first.reply.length).toBeLessThanOrEqual(240);
     expect(first.status).toBe("completed");
     expect(JSON.stringify([first, f.events, f.finishes])).not.toContain("PRIVATE REASONING");
@@ -166,6 +192,21 @@ describe("debug party supervisor", () => {
     expect(f.events).toContainEqual(expect.objectContaining({
       toolName: "searchProducts", status: "failed", metadata: { mcpTool: "silpo_find_products_batch", errorCode: "MCP_503" },
     }));
+  });
+
+  it("records compact batch candidates rather than raw MCP data", async () => {
+    const f = setup([response("searchProducts", { queries: ["вода", "water"] }), response("complete", { reply: "Знайшов варіанти." })]);
+    f.dependencies.catalogAdapter = async (_host, operation) => operation({
+      search: async () => [{ productId: "water", companyId: "company", branchId: "branch", name: "Вода", unit: "1 л", unitPriceCents: 3000, discountCents: null, imageUrl: null, available: true }],
+      inspect: async () => [],
+    });
+
+    await runDebugPartySupervisor(build, f.dependencies);
+
+    const event = f.events.find((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null
+      && "toolName" in entry && entry.toolName === "searchProducts" && "status" in entry && entry.status === "completed");
+    expect(event).toMatchObject({ metadata: { trace: { type: "catalog.response", queries: ["вода", "water"], candidates: expect.arrayContaining([expect.objectContaining({ productId: "water", evidenceId: expect.any(String) })]) } } });
+    expect(JSON.stringify(event)).not.toMatch(/access_token|authorization|raw/i);
   });
 
   it("stops at the step limit without claiming success", async () => {

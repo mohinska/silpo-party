@@ -17,6 +17,10 @@ const errorDetails: Record<string, string> = {
   MCP_OPERATION_FAILED: "Silpo MCP не завершив операцію. Нижче вказано точний інструмент.",
 };
 
+function price(cents: number) {
+  return new Intl.NumberFormat("uk-UA", { style: "currency", currency: "UAH" }).format(cents / 100);
+}
+
 export function DebugLog({ workspace }: { workspace: DebugPartyWorkspace }) {
   return <section id="party-log" className={styles.logPanel} aria-label="Журнал роботи помічника">
     <details className={styles.debugDrawer}>
@@ -26,6 +30,15 @@ export function DebugLog({ workspace }: { workspace: DebugPartyWorkspace }) {
       <ol className={styles.toolEvents}>{workspace.toolEvents?.map((event) => <li key={event.id}>
         <div><time dateTime={event.createdAt}>{new Date(event.createdAt).toLocaleTimeString("uk-UA", { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "Europe/Kyiv" })}</time><code>{event.toolName}</code><span>{statuses[event.status]}</span></div>
         <small>Запуск <code title={event.runId}>{event.runId.slice(0, 8)}</code>{event.durationMs !== null && ` · ${event.durationMs} мс`}{event.count !== null && ` · ${event.count} результатів`}</small>
+        {event.trace && <details className={styles.catalogTrace}>
+          <summary>Відповідь <code>{event.trace.mcpTool}</code></summary>
+          <p>Запити: {event.trace.queries.join(" · ")}</p>
+          {event.trace.preselection && <p>Попередній відбір: {event.trace.preselection.status === "completed" ? "готово" : event.trace.preselection.status === "unavailable" ? "недоступний" : "некоректна відповідь"}{event.trace.preselection.normalizedIntent && <> · тип: {event.trace.preselection.normalizedIntent.productKind}{event.trace.preselection.normalizedIntent.exclusions.length ? <> · виключено: {event.trace.preselection.normalizedIntent.exclusions.join(", ")}</> : null}</>}</p>}
+          {event.trace.candidates.length ? <ul>{event.trace.candidates.map((candidate) => <li key={candidate.evidenceId}>
+            <span>{candidate.name} · {candidate.unit}</span><b>{price(candidate.unitPriceCents)}</b>{candidate.discountCents !== null && <em>знижка {price(candidate.discountCents)}</em>}
+            {candidate.preselection && <small>Відбір: {candidate.preselection.verdict} · {candidate.preselection.reason}</small>}
+          </li>)}</ul> : <p>Підтверджених товарів не знайдено.</p>}
+        </details>}
         {event.status === "failed" && <p className={styles.error}>{event.errorCode ? errorDetails[event.errorCode] ?? "Інструмент не завершив операцію." : "Інструмент не завершив операцію."}{event.mcpTool && <> MCP: <code>{event.mcpTool}</code></>}{event.errorCode && <> · код: <code>{event.errorCode}</code></>}</p>}
       </li>)}</ol>
     </details>
