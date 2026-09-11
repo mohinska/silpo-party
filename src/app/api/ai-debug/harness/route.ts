@@ -23,6 +23,8 @@ const sessionLifetimeMs = 2 * 60 * 60 * 1_000;
 const HarnessFailureCodeSchema = z.enum([
   "HARNESS_AGENT_FAILED",
   "HARNESS_RECIPE_FAILED",
+  "HARNESS_RECIPE_SOURCE_FAILED",
+  "HARNESS_RECIPE_NORMALIZER_FAILED",
   "HARNESS_CATALOG_FAILED",
   "HARNESS_RUN_FAILED",
 ]);

@@ -39,7 +39,22 @@ describe("AI Debug local harness", () => {
       model,
       retrieveRecipe: async () => { throw new Error("upstream recipe source failed"); },
       createGateway: () => ({ search: async () => ({ groups: [] }), inspect: async () => [], close: async () => undefined }),
-    })).rejects.toMatchObject({ code: "HARNESS_RECIPE_FAILED" });
+    })).rejects.toMatchObject({ code: "HARNESS_RECIPE_SOURCE_FAILED" });
+  });
+
+  it("reports a recipe-normalizer failure without exposing its response", async () => {
+    const model = new MockLanguageModelV4({ doGenerate: [response("resolveRecipe", { query: "Карбонара" })] });
+    const recipeNormalizer: RecipeNormalizer = async () => { throw new Error("invalid provider response"); };
+
+    await expect(runDebugHarness({ message: "паста карбонара", mcpAccessToken: "never-return" }, {
+      model,
+      recipeNormalizer,
+      retrieveRecipe: async () => ({
+        id: "carbonara", title: "Карбонара", source: { provider: "silpo", title: "Карбонара", url: "https://silpo.ua/recipes/karbonara" }, baseServings: 2,
+        ingredients: [{ name: "Спагеті", quantity: 200, unit: "g", variant: "standard", optional: false }],
+      }),
+      createGateway: () => ({ search: async () => ({ groups: [] }), inspect: async () => [], close: async () => undefined }),
+    })).rejects.toMatchObject({ code: "HARNESS_RECIPE_NORMALIZER_FAILED" });
   });
 
   it("runs the sourced recipe subagent and keeps normalized ingredients in the local session", async () => {

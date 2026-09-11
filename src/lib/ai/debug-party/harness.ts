@@ -59,12 +59,16 @@ export function harnessFailureCodeForTool(toolName: string | undefined) {
   return "HARNESS_AGENT_FAILED" as const;
 }
 
-class DebugHarnessRunError extends Error {
-  readonly code: ReturnType<typeof harnessFailureCodeForTool>;
+type DebugHarnessFailureCode = ReturnType<typeof harnessFailureCodeForTool>
+  | "HARNESS_RECIPE_SOURCE_FAILED"
+  | "HARNESS_RECIPE_NORMALIZER_FAILED";
 
-  constructor(toolName: string | undefined) {
+class DebugHarnessRunError extends Error {
+  readonly code: DebugHarnessFailureCode;
+
+  constructor(toolName: string | undefined, code?: DebugHarnessFailureCode) {
     super("AI Debug harness run failed.");
-    this.code = harnessFailureCodeForTool(toolName);
+    this.code = code ?? harnessFailureCodeForTool(toolName);
   }
 }
 
@@ -85,6 +89,7 @@ export async function runDebugHarness(input: unknown, dependencies: HarnessDepen
   let reply: string | undefined;
   let activeToolName: string | undefined;
   let lastFailedToolName: string | undefined;
+  let lastFailureCode: DebugHarnessFailureCode | undefined;
   session.trace = [];
   const complete = {
     description: "Finish with a concise Ukrainian reply.",
@@ -98,8 +103,20 @@ export async function runDebugHarness(input: unknown, dependencies: HarnessDepen
     description: "Retrieve one sourced recipe and its normalized grocery ingredients. This does not mutate a Silpo cart.",
     inputSchema: z.strictObject({ query: z.string().trim().min(1).max(200), url: z.url().optional() }),
     execute: async ({ query, url }: { query: string; url?: string }) => {
-      const sourceRecipe = await (dependencies.retrieveRecipe ?? retrieveRecipe)({ dishName: query, requestedUrl: url });
-      const normalized = await normalizeRecipeForCart(sourceRecipe, dependencies.recipeNormalizer ?? createRecipeNormalizer(dependencies.environment));
+      let sourceRecipe: Recipe;
+      try {
+        sourceRecipe = await (dependencies.retrieveRecipe ?? retrieveRecipe)({ dishName: query, requestedUrl: url });
+      } catch {
+        lastFailureCode = "HARNESS_RECIPE_SOURCE_FAILED";
+        throw new Error("Recipe source is unavailable.");
+      }
+      let normalized: Recipe;
+      try {
+        normalized = await normalizeRecipeForCart(sourceRecipe, dependencies.recipeNormalizer ?? createRecipeNormalizer(dependencies.environment));
+      } catch {
+        lastFailureCode = "HARNESS_RECIPE_NORMALIZER_FAILED";
+        throw new Error("Recipe normalization is unavailable.");
+      }
       const timestamp = new Date().toISOString();
       const saved = {
         id: crypto.randomUUID(), partyId: PARTY_ID, recipeId: normalized.id, title: normalized.title, sourceUrl: normalized.source.url ?? null,
@@ -141,7 +158,7 @@ export async function runDebugHarness(input: unknown, dependencies: HarnessDepen
       () => new DebugHarnessRunError(activeToolName),
     );
   } catch {
-    throw new DebugHarnessRunError(activeToolName ?? lastFailedToolName);
+    throw new DebugHarnessRunError(activeToolName ?? lastFailedToolName, lastFailureCode);
   } finally {
     await gateway.close().catch(() => undefined);
   }
