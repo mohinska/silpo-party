@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { createDebugCatalogGateway, type DebugCatalogMcpSession } from "./catalog-gateway";
+import { createDebugCatalogGateway, createHostDebugCatalogGateway, type DebugCatalogMcpSession } from "./catalog-gateway";
 
 vi.mock("server-only", () => ({}));
+const mcp = vi.hoisted(() => ({ openSilpoMcpSession: vi.fn() }));
+vi.mock("@/lib/silpo/mcp", () => ({ ...mcp }));
 
 const now = "2026-09-11T12:00:00.000Z";
 
@@ -10,6 +12,18 @@ function tool(name: string, properties: Record<string, unknown> = {}, required: 
 }
 
 describe("debug catalog gateway", () => {
+  it("creates a Host-scoped session through the server-only MCP factory", async () => {
+    const close = vi.fn(async () => undefined);
+    mcp.openSilpoMcpSession.mockResolvedValueOnce({ tools: new Map(), client: { callTool: vi.fn() }, close });
+
+    const gateway = createHostDebugCatalogGateway("host-id");
+    await expect(gateway.inspect("product")).rejects.toThrow("MCP_READ:silpo_get_my_shopping_cart:MCP_404");
+    await gateway.close();
+
+    expect(mcp.openSilpoMcpSession).toHaveBeenCalledWith("host-id");
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
   it("opens one session, batches alternative queries, and reuses its cart context for inspect", async () => {
     const calls: Array<{ name: string; arguments: Record<string, unknown> }> = [];
     const close = vi.fn(async () => undefined);

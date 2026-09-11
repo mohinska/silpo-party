@@ -59,7 +59,7 @@ function setup(products = [product()]) {
 describe("verified local cart tools", () => {
   it("persists at most twelve bounded search results with server run/time provenance", async () => {
     const fixture = setup(Array.from({ length: 50 }, (_, i) => product(`p${i}`)));
-    const result = await fixture.tools.searchProducts.execute({ query: "milk" });
+    const result = await fixture.tools.searchProducts.execute({ queries: ["milk"] });
     expect(result.products).toHaveLength(12);
     expect(fixture.evidence.size).toBe(12);
     expect([...fixture.evidence.values()][0]).toMatchObject({ party_id: "party", run_id: "run", observed_at: now, source: "catalog_search" });
@@ -72,7 +72,7 @@ describe("verified local cart tools", () => {
     const fixture = setup();
     await expect(fixture.tools.addProduct.execute({ evidenceId: "invented", quantity: 1, expectedRevision: 2 })).rejects.toThrow(/verified/i);
     await expect(fixture.tools.replaceProduct.execute({ itemId: "invented", evidenceId: "invented", quantity: 1, expectedRevision: 2 })).rejects.toThrow();
-    const { products } = await fixture.tools.searchProducts.execute({ query: "milk" });
+    const { products } = await fixture.tools.searchProducts.execute({ queries: ["milk"] });
     const id = products[0].evidenceId;
     const original = fixture.evidence.get(id)!;
     for (const patch of [{ run_id: "other" }, { party_id: "other" }, { observed_at: "2026-09-09T12:00:00.000Z" }, { available: false }]) {
@@ -84,7 +84,7 @@ describe("verified local cart tools", () => {
 
   it("applies local add, replace, quantity and remove using verified item IDs and revisions", async () => {
     const fixture = setup([product("a"), product("b")]);
-    const { products } = await fixture.tools.searchProducts.execute({ query: "milk" });
+    const { products } = await fixture.tools.searchProducts.execute({ queries: ["milk"] });
     const added = await fixture.tools.addProduct.execute({ evidenceId: products[0].evidenceId, quantity: 2, expectedRevision: 2 });
     expect(added).toMatchObject({ status: "applied", revision: 3, items: [{ productId: "a", quantity: 2 }] });
     const itemId = added.items[0].id;
@@ -98,7 +98,7 @@ describe("verified local cart tools", () => {
 
   it("returns fresh cart state for stale commands including items removed since the caller read", async () => {
     const fixture = setup();
-    const { products } = await fixture.tools.searchProducts.execute({ query: "milk" });
+    const { products } = await fixture.tools.searchProducts.execute({ queries: ["milk"] });
     await fixture.tools.addProduct.execute({ evidenceId: products[0].evidenceId, quantity: 1, expectedRevision: 2 });
     const stale = await fixture.tools.removeProduct.execute({ itemId: "old-item", expectedRevision: 2 });
     expect(stale).toMatchObject({ status: "stale", revision: 3, items: [{ productId: "milk" }] });
@@ -107,12 +107,12 @@ describe("verified local cart tools", () => {
 
   it("checks strict inputs, membership, party state, and trusted Host identity before opening MCP", async () => {
     const fixture = setup();
-    await expect(fixture.tools.searchProducts.execute({ query: "milk", hostId: "other" } as never)).rejects.toThrow();
+    await expect(fixture.tools.searchProducts.execute({ queries: ["milk"], hostId: "other" } as never)).rejects.toThrow();
     await expect(fixture.tools.addProduct.execute({ evidenceId: "id", quantity: 0, expectedRevision: 2 })).rejects.toThrow();
     const foreign = createLocalCartTools({ partyId: "party", code: "ABCDEFGH", actorId: "outsider", hostId: "host", runId: "run", repository: fixture.repository });
     await expect(foreign.inspectCart.execute({})).rejects.toThrow();
     const wrongHost = createLocalCartTools({ partyId: "party", code: "ABCDEFGH", actorId: "host", hostId: "other", runId: "run", repository: fixture.repository });
-    await expect(wrongHost.searchProducts.execute({ query: "milk" })).rejects.toThrow(/Host/i);
+    await expect(wrongHost.searchProducts.execute({ queries: ["milk"] })).rejects.toThrow(/Host/i);
     expect(fixture.calls).toEqual([]);
   });
 
@@ -129,7 +129,7 @@ describe("verified local cart tools", () => {
     const fixture = setup([product("a"), product("b", 500)]);
     const inspected = await fixture.tools.inspectProduct.execute({ productId: "a" });
     expect(inspected.products[0]).toMatchObject({ productId: "a", available: true });
-    const searched = await fixture.tools.searchProducts.execute({ query: "milk" });
+    const searched = await fixture.tools.searchProducts.execute({ queries: ["milk"] });
     const compared = await fixture.tools.compareAlternatives.execute({ evidenceIds: searched.products.map((entry) => entry.evidenceId) });
     expect(compared.products.map((p) => p.productId)).toEqual(["a", "b"]);
     await expect(fixture.tools.compareAlternatives.execute({ evidenceIds: ["invented"] })).rejects.toThrow(/verified/i);
@@ -139,7 +139,7 @@ describe("verified local cart tools", () => {
 
   it("repository refuses evidence reads and writes without membership", async () => {
     const fixture = setup();
-    const { products } = await fixture.tools.searchProducts.execute({ query: "milk" });
+    const { products } = await fixture.tools.searchProducts.execute({ queries: ["milk"] });
     const entry = await fixture.repository.findEvidence({ partyId: "party", actorId: "host", evidenceId: products[0].evidenceId });
     expect(entry).toMatchObject({ productId: "milk", runId: "run" });
     await expect(fixture.repository.findEvidence({ partyId: "party", actorId: "outsider", evidenceId: products[0].evidenceId })).rejects.toThrow();

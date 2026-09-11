@@ -5,10 +5,10 @@ import { runDebugPartySupervisor, type SupervisorDependencies } from "./supervis
 import type { DebugPartyWorkspace } from "./repository";
 import { readToolData } from "../../silpo/tool-data";
 
-const { rawCall, withMcp, retrieveRecipe } = vi.hoisted(() => ({ rawCall: vi.fn(), withMcp: vi.fn(), retrieveRecipe: vi.fn() }));
+const { rawCall, withMcp, openMcp, retrieveRecipe } = vi.hoisted(() => ({ rawCall: vi.fn(), withMcp: vi.fn(), openMcp: vi.fn(), retrieveRecipe: vi.fn() }));
 vi.mock("server-only", () => ({}));
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: vi.fn() }));
-vi.mock("@/lib/silpo/mcp", () => ({ withSilpoMcp: withMcp, readToolData: (value: unknown) => readToolData(value) }));
+vi.mock("@/lib/silpo/mcp", () => ({ withSilpoMcp: withMcp, openSilpoMcpSession: openMcp, readToolData: (value: unknown) => readToolData(value) }));
 vi.mock("../planning/recipe-retrieval", () => ({ retrieveRecipe }));
 
 const now = "2026-09-10T12:00:00.000Z";
@@ -145,7 +145,7 @@ describe("debug party supervisor", () => {
   });
 
   it("persists a safe failing Silpo MCP method and code in the debug event", async () => {
-    const f = setup([response("searchProducts", { query: "вода" }), response("complete", { reply: "Пошук тимчасово недоступний." })]);
+    const f = setup([response("searchProducts", { queries: ["вода"] }), response("complete", { reply: "Пошук тимчасово недоступний." })]);
     f.dependencies.catalogAdapter = async () => { throw new Error("MCP_READ:silpo_find_products_batch:MCP_503"); };
 
     await runDebugPartySupervisor(build, f.dependencies);
@@ -156,7 +156,7 @@ describe("debug party supervisor", () => {
   });
 
   it("reads safe MCP metadata from a wrapped upstream error", async () => {
-    const f = setup([response("searchProducts", { query: "вода" }), response("complete", { reply: "Пошук тимчасово недоступний." })]);
+    const f = setup([response("searchProducts", { queries: ["вода"] }), response("complete", { reply: "Пошук тимчасово недоступний." })]);
     f.dependencies.catalogAdapter = async () => {
       throw new Error("Catalog read failed", { cause: new Error("MCP_READ:silpo_find_products_batch:MCP_503") });
     };
@@ -178,8 +178,8 @@ describe("debug party supervisor", () => {
   });
 
   it("caps concurrent catalog calls and uses the Host identity", async () => {
-    const output = response("searchProducts", { query: "овочі" });
-    output.content.push({ type: "tool-call", toolCallId: "extra", toolName: "searchProducts", input: '{"query":"фрукти"}' });
+    const output = response("searchProducts", { queries: ["овочі"] });
+    output.content.push({ type: "tool-call", toolCallId: "extra", toolName: "searchProducts", input: '{"queries":["фрукти"]}' });
     const f = setup([output]);
     f.dependencies.environment = { AI_DEBUG_MAX_MCP_CALLS: "1" };
     const hosts: string[] = [];
@@ -190,7 +190,7 @@ describe("debug party supervisor", () => {
   });
 
   it.each(["total", "tool"])("stops a hanging %s operation and sanitizes failure output", async (kind) => {
-    const f = setup([response("searchProducts", { query: "SECRET" })]);
+    const f = setup([response("searchProducts", { queries: ["SECRET"] })]);
     f.dependencies.environment = { AI_DEBUG_TOTAL_TIMEOUT_MS: kind === "total" ? "20" : "1000", AI_DEBUG_TOOL_TIMEOUT_MS: kind === "tool" ? "20" : "1000" };
     if (kind === "total") f.dependencies.model = new MockLanguageModelV4({ doGenerate: () => new Promise(() => {}) });
     else f.dependencies.catalogAdapter = () => new Promise(() => {});
@@ -200,16 +200,17 @@ describe("debug party supervisor", () => {
   });
 
   it("counts every raw catalog read including Host cart discovery", async () => {
-    const f = setup([response("searchProducts", { query: "овочі" })]);
+    const f = setup([response("searchProducts", { queries: ["овочі"] })]);
     f.dependencies.catalogAdapter = undefined;
     f.dependencies.environment = { AI_DEBUG_MAX_MCP_CALLS: "1" };
     rawCall.mockReset().mockResolvedValue({ structuredContent: { cartId: "cart" } });
-    withMcp.mockImplementation(async (_host, operation) => operation({ callTool: rawCall }, new Map([
+    openMcp.mockResolvedValue({ client: { callTool: rawCall }, close: async () => undefined, tools: new Map([
       ["silpo_get_my_shopping_cart", { name: "silpo_get_my_shopping_cart", inputSchema: { type: "object" } }],
       ["silpo_get_shopping_cart_by_id", { name: "silpo_get_shopping_cart_by_id", inputSchema: { type: "object" } }],
-    ])));
+    ]) });
     const result = await runDebugPartySupervisor(build, f.dependencies);
     expect(result).toMatchObject({ status: "failed", reason: "tool_limit" });
+    expect(openMcp).toHaveBeenCalledWith("host");
     expect(rawCall).toHaveBeenCalledTimes(1);
     expect(rawCall).toHaveBeenCalledWith({ name: "silpo_get_my_shopping_cart", arguments: {} });
   });

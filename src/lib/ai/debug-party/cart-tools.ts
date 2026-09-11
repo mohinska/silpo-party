@@ -1,6 +1,7 @@
 import type { ToolSet } from "ai";
 import { z } from "zod";
 import type { HostCatalogAdapter, SilpoVerifiedProduct } from "../../silpo/cart";
+import type { DebugCatalogGateway } from "./catalog-gateway";
 import type { CartMutation, DebugPartyRepository, DebugPartyWorkspace } from "./repository";
 import { DebugProductEvidenceSchema, type DebugProductEvidence } from "./schemas";
 
@@ -8,7 +9,8 @@ const Id = z.string().trim().min(1).max(200);
 const Revision = z.number().int().nonnegative();
 const Quantity = z.number().finite().positive().max(1000);
 const Empty = z.strictObject({});
-const Search = z.strictObject({ query: z.string().trim().min(1).max(200) });
+const Search = z.strictObject({ queries: z.array(z.string().trim().min(1).max(100)).min(1).max(3).refine((queries) =>
+  new Set(queries.map((query) => query.toLocaleLowerCase("uk-UA"))).size === queries.length, "Search queries must be distinct.") });
 const Inspect = z.strictObject({ productId: Id });
 const Compare = z.strictObject({ evidenceIds: z.array(Id).min(1).max(12) });
 const Add = z.strictObject({ evidenceId: Id, quantity: Quantity, expectedRevision: Revision });
@@ -25,6 +27,7 @@ export type LocalCartToolsContext = {
   hostId: string;
   runId: string;
   repository: Pick<DebugPartyRepository, "loadWorkspace" | "applyCartCommand" | "saveEvidence" | "findEvidence">;
+  catalogGateway?: Pick<DebugCatalogGateway, "search" | "inspect">;
   catalogAdapter?: HostCatalogAdapter;
   now?: () => Date;
 };
@@ -64,6 +67,14 @@ export function createLocalCartTools(context: LocalCartToolsContext) {
     const { withSilpoCatalogReader } = await import("../../silpo/cart");
     return withSilpoCatalogReader(userId, operation);
   });
+  const catalogGateway: Pick<DebugCatalogGateway, "search" | "inspect"> = context.catalogGateway ?? {
+    async search(queries) {
+      return { groups: await Promise.all(queries.map(async (query) => ({ query, products: await catalogAdapter(hostId, (reader) => reader.search(query)) }))) };
+    },
+    inspect(productId) {
+      return catalogAdapter(hostId, (reader) => reader.inspect(productId));
+    },
+  };
   let catalogCalls = 0;
 
   async function workspace() {
@@ -82,28 +93,46 @@ export function createLocalCartTools(context: LocalCartToolsContext) {
     return entry;
   }
 
-  async function discover(kind: "search" | "inspect", value: string) {
-    const state = await workspace();
-    if (!["ready", "running"].includes(state.party.status)) throw new Error("Party is not ready for catalog planning.");
-    if (catalogCalls >= 20) throw new Error("Catalog call budget exhausted.");
-    catalogCalls += 1;
-    const products = await catalogAdapter(hostId, (reader) => kind === "search" ? reader.search(value) : reader.inspect(value));
+  async function persistProducts(state: DebugPartyWorkspace, products: readonly SilpoVerifiedProduct[], source: "catalog_search" | "product_detail") {
     const previous = new Set(state.contexts.filter((entry) => entry.contextStatus === "ready").flatMap((entry) => entry.recentProducts.map((product) => product.productId)));
     const observedAt = now().toISOString();
     const saved: DebugProductEvidence[] = [];
     for (const product of products.slice(0, 12)) {
-      if (kind === "inspect" && product.productId !== value) continue;
       const evidence = DebugProductEvidenceSchema.parse({
         ...productFields(product), id: crypto.randomUUID(), partyId, runId,
-        source: previous.has(product.productId) ? "recent_purchase" : kind === "search" ? "catalog_search" : "product_detail",
+        source: previous.has(product.productId) ? "recent_purchase" : source,
         observedAt, createdAt: observedAt,
       });
       saved.push(await repository.saveEvidence({ partyId, actorId, evidence }));
     }
-    // Availability is still returned for inspection; only available candidates are preferred.
     const ranked = rankCandidates(saved.map((entry) => ({ ...entry, suitable: true })));
     const unavailable = saved.filter((entry) => !entry.available);
-    return { revision: state.party.cartRevision, products: [...ranked, ...unavailable].map(compactProduct) };
+    return [...ranked, ...unavailable];
+  }
+
+  async function discoverSearch(queries: z.infer<typeof Search>["queries"]) {
+    const state = await workspace();
+    if (!["ready", "running"].includes(state.party.status)) throw new Error("Party is not ready for catalog planning.");
+    if (catalogCalls >= 20) throw new Error("Catalog call budget exhausted.");
+    catalogCalls += 1;
+    const result = await catalogGateway.search(queries);
+    const evidenceByProduct = new Map<string, DebugProductEvidence>();
+    const groups = [];
+    for (const group of result.groups) {
+      const saved = await persistProducts(state, group.products, "catalog_search");
+      for (const entry of saved) evidenceByProduct.set(entry.productId, entry);
+      groups.push({ query: group.query, products: saved.map(compactProduct) });
+    }
+    return { revision: state.party.cartRevision, groups, products: [...evidenceByProduct.values()].map(compactProduct) };
+  }
+
+  async function discoverInspect(productId: string) {
+    const state = await workspace();
+    if (!["ready", "running"].includes(state.party.status)) throw new Error("Party is not ready for catalog planning.");
+    if (catalogCalls >= 20) throw new Error("Catalog call budget exhausted.");
+    catalogCalls += 1;
+    const saved = await persistProducts(state, (await catalogGateway.inspect(productId)).filter((product) => product.productId === productId), "product_detail");
+    return { revision: state.party.cartRevision, products: saved.map(compactProduct) };
   }
 
   async function mutate(expectedRevision: number, mutation: CartMutation) {
@@ -119,10 +148,10 @@ export function createLocalCartTools(context: LocalCartToolsContext) {
   return {
     inspectCart: { description: "Inspect the current local cart and revision.", inputSchema: Empty,
       execute: async (input: z.infer<typeof Empty>) => { Empty.parse(input); return compactCart(await workspace()); } },
-    searchProducts: { description: "Search live Host store products; persist bounded verified evidence. Prefer suitable recent purchases.", inputSchema: Search,
-      execute: async (input: z.infer<typeof Search>) => discover("search", Search.parse(input).query) },
+    searchProducts: { description: "Search one to three alternative live Host store product queries in one batch; persist bounded verified evidence. Choose a returned evidence ID yourself.", inputSchema: Search,
+      execute: async (input: z.infer<typeof Search>) => discoverSearch(Search.parse(input).queries) },
     inspectProduct: { description: "Inspect a known product ID with live price, promotion and availability from the Host store.", inputSchema: Inspect,
-      execute: async (input: z.infer<typeof Inspect>) => discover("inspect", Inspect.parse(input).productId) },
+      execute: async (input: z.infer<typeof Inspect>) => discoverInspect(Inspect.parse(input).productId) },
     compareAlternatives: { description: "Compare evidence IDs already judged suitable. Prefer discounted recent purchases, then other recent purchases, then catalog order.", inputSchema: Compare,
       execute: async (input: z.infer<typeof Compare>) => {
         const { evidenceIds } = Compare.parse(input);

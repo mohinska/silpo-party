@@ -21,10 +21,13 @@ export type SilpoTool = {
   annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean };
 };
 
-export async function withSilpoMcp<T>(
-  userId: string,
-  operation: (client: Client, tools: Map<string, SilpoTool>) => Promise<T>,
-) {
+export type SilpoMcpSession = {
+  client: Client;
+  tools: Map<string, SilpoTool>;
+  close(): Promise<void>;
+};
+
+export async function openSilpoMcpSession(userId: string): Promise<SilpoMcpSession> {
   const accessToken = await getAccessToken(userId);
   if (!accessToken) throw new Error("Організатор має підключити акаунт «Сільпо» у профілі.");
 
@@ -35,10 +38,22 @@ export async function withSilpoMcp<T>(
   try {
     await client.connect(transport);
     const listed = await client.listTools();
-    const tools = new Map(listed.tools.map((tool) => [tool.name, tool as SilpoTool]));
-    return await operation(client, tools);
-  } finally {
+    return { client, tools: new Map(listed.tools.map((tool) => [tool.name, tool as SilpoTool])), close: () => client.close().catch(() => undefined) };
+  } catch (error) {
     await client.close().catch(() => undefined);
+    throw error;
+  }
+}
+
+export async function withSilpoMcp<T>(
+  userId: string,
+  operation: (client: Client, tools: Map<string, SilpoTool>) => Promise<T>,
+) {
+  const session = await openSilpoMcpSession(userId);
+  try {
+    return await operation(session.client, session.tools);
+  } finally {
+    await session.close();
   }
 }
 

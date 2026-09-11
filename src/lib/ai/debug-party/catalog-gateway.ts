@@ -40,7 +40,18 @@ export type DebugCatalogGateway = {
   close(): Promise<void>;
 };
 
-export function createDebugCatalogGateway({ openSession }: { openSession: () => Promise<DebugCatalogMcpSession> }): DebugCatalogGateway {
+export function createHostDebugCatalogGateway(hostId: string, beforeCall?: () => void): DebugCatalogGateway {
+  return createDebugCatalogGateway({
+    async openSession() {
+      const { openSilpoMcpSession } = await import("@/lib/silpo/mcp");
+      const session = await openSilpoMcpSession(hostId);
+      return { tools: session.tools, callTool: (request) => session.client.callTool(request), close: () => session.close() };
+    },
+    beforeCall,
+  });
+}
+
+export function createDebugCatalogGateway({ openSession, beforeCall }: { openSession: () => Promise<DebugCatalogMcpSession>; beforeCall?: () => void }): DebugCatalogGateway {
   let session: DebugCatalogMcpSession | undefined;
   let context: CartContext | undefined;
   let opening: Promise<DebugCatalogMcpSession> | undefined;
@@ -57,10 +68,10 @@ export function createDebugCatalogGateway({ openSession }: { openSession: () => 
   async function activeContext() {
     if (context) return context;
     const current = await activeSession();
-    const active = await call(current, "silpo_get_my_shopping_cart", {});
+    const active = await call(current, "silpo_get_my_shopping_cart", {}, beforeCall);
     const cartId = stringValue(deepValue(active, ["shoppingCartId", "cartId"]));
     if (!cartId) throw new Error("MCP_READ:silpo_get_my_shopping_cart:MCP_OPERATION_FAILED");
-    const details = await call(current, "silpo_get_shopping_cart_by_id", { shoppingCartId: cartId });
+    const details = await call(current, "silpo_get_shopping_cart_by_id", { shoppingCartId: cartId }, beforeCall);
     const branchId = stringValue(deepValue(details, ["branchId"]));
     const companyId = stringValue(deepValue(details, ["companyId"]));
     const deliveryType = stringValue(deepValue(details, ["deliveryType"]));
@@ -70,7 +81,7 @@ export function createDebugCatalogGateway({ openSession }: { openSession: () => 
       throw new Error("MCP_READ:silpo_get_shopping_cart_by_id:MCP_OPERATION_FAILED");
     }
     const resolved: CartContext = { cartId, branchId, companyId, deliveryType, timeslotStart, timeslotEnd };
-    await call(current, "silpo_get_time_slots", { branchId });
+    await call(current, "silpo_get_time_slots", { branchId }, beforeCall);
     context = resolved;
     return resolved;
   }
@@ -86,7 +97,7 @@ export function createDebugCatalogGateway({ openSession }: { openSession: () => 
         timeslotStart: currentContext.timeslotStart,
         timeslotEnd: currentContext.timeslotEnd,
         products: compact,
-      });
+      }, beforeCall);
       const groups = queryGroups(data, currentContext);
       return { groups: compact.map((query) => ({ query, products: groups.get(searchKey(query)) ?? [] })) };
     },
@@ -97,7 +108,7 @@ export function createDebugCatalogGateway({ openSession }: { openSession: () => 
       const currentContext = await activeContext();
       const detail = [...current.tools.keys()].find((name) => /product.*(?:detail|by_?id)|get_product$/i.test(name));
       if (!detail) throw new Error("MCP_READ:silpo_product_detail:MCP_404");
-      const data = await call(current, detail, buildProductArguments(current.tools.get(detail), currentContext, id));
+      const data = await call(current, detail, buildProductArguments(current.tools.get(detail), currentContext, id), beforeCall);
       return products(data, currentContext).filter((entry) => entry.productId === id);
     },
     async close() {
@@ -118,9 +129,10 @@ function compactQueries(queries: readonly string[]) {
   return compact;
 }
 
-async function call(session: DebugCatalogMcpSession, name: string, argumentsValue: Record<string, unknown>) {
+async function call(session: DebugCatalogMcpSession, name: string, argumentsValue: Record<string, unknown>, beforeCall?: () => void) {
   if (!session.tools.has(name)) throw new Error(`MCP_READ:${name}:MCP_404`);
   try {
+    beforeCall?.();
     const result = await session.callTool({ name, arguments: argumentsValue });
     if (isErrorResult(result)) throw new Error("MCP returned an error result.");
     return bounded(readToolData(result));
