@@ -3,6 +3,12 @@ import "server-only";
 import { createHash } from "node:crypto";
 import { RecipeSchema, type Recipe } from "./proposal-schemas";
 
+const RecipeRequestHeaders = {
+  "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131 Safari/537.36",
+  Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+  "Accept-Language": "uk-UA,uk;q=0.9,en;q=0.8",
+};
+
 function decodeHtml(value: string) {
   return value.replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&amp;/g, "&").replace(/&nbsp;/g, " ").replace(/&ndash;|&mdash;/g, "-").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 }
@@ -94,7 +100,15 @@ export function parseRecipeDocument(html: string, url: string): Recipe {
   // lines are real, but have no purchasable quantity; retain only explicitly
   // quantified ingredients rather than rejecting an otherwise complete recipe
   // or inventing an amount for the seasoning.
-  const ingredients = rawIngredients.map(parseIngredient).filter((ingredient): ingredient is NonNullable<ReturnType<typeof parseIngredient>> => ingredient !== undefined);
+  const seenIngredients = new Set<string>();
+  const ingredients = rawIngredients.map(parseIngredient)
+    .filter((ingredient): ingredient is NonNullable<ReturnType<typeof parseIngredient>> => ingredient !== undefined)
+    .filter((ingredient) => {
+      const key = `${ingredient.name.toLocaleLowerCase("uk-UA")}\n${ingredient.quantity}\n${ingredient.unit}\n${ingredient.variant}`;
+      if (seenIngredients.has(key)) return false;
+      seenIngredients.add(key);
+      return true;
+    });
   const yieldText = Array.isArray(recipeData?.recipeYield) ? String(recipeData.recipeYield[0] ?? "") : String(recipeData?.recipeYield ?? html.match(/на\s+(\d+)\s+порц/iu)?.[1] ?? "");
   const servings = Number(yieldText.match(/\d+/)?.[0]);
   if (!title || !Number.isInteger(servings) || servings <= 0 || !ingredients.length) throw new Error("The page does not contain a complete structured recipe; no recipe contents were inferred.");
@@ -112,7 +126,7 @@ function assertPublicRecipeUrl(url: string) {
 
 async function fetchParsedRecipe(url: string, fetcher: typeof fetch) {
   assertPublicRecipeUrl(url);
-  const response = await fetcher(url, { cache: "no-store" });
+  const response = await fetcher(url, { cache: "no-store", headers: RecipeRequestHeaders });
   if (!response.ok) throw new Error("The recipe source could not be retrieved.");
   return parseRecipeDocument(await response.text(), response.url || url);
 }
@@ -126,7 +140,7 @@ export async function retrieveRecipe(input: { dishName: string; requestedUrl?: s
   {
     // The public `?search=` page is not a stable filtered API. Index the
     // catalog page and rank only its actual recipe links instead.
-    const search = await fetcher("https://silpo.ua/recipes", { cache: "no-store" });
+    const search = await fetcher("https://silpo.ua/recipes", { cache: "no-store", headers: RecipeRequestHeaders });
     if (!search.ok) throw new Error("Silpo recipe index is unavailable.");
     const html = await search.text();
     const words = input.dishName.toLocaleLowerCase("uk-UA").match(/[\p{L}\p{N}]+/gu) ?? [];
