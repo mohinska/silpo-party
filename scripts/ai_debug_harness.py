@@ -28,6 +28,9 @@ TOKEN_URL = "https://mcp.silpo.ua/token"
 REGISTER_URL = "https://mcp.silpo.ua/register"
 RESOURCE = "https://mcp.silpo.ua"
 SENSITIVE_KEYS = {"access_token", "refresh_token", "authorization", "mcpaccesstoken", "client_secret", "raw"}
+# The server allows a single agent run for 90 seconds. Keep the local client
+# deadline above it so controlled harness errors can reach the terminal.
+HARNESS_REQUEST_TIMEOUT_SECONDS = 120
 
 
 def code_challenge(verifier: str) -> str:
@@ -69,11 +72,19 @@ def http_error_detail(error: urllib.error.HTTPError) -> str | None:
     return code if isinstance(code, str) and code.startswith("HARNESS_") else None
 
 
-def json_request(url: str, body: Mapping[str, Any], headers: Mapping[str, str] | None = None) -> dict[str, Any]:
+def json_request(
+    url: str,
+    body: Mapping[str, Any],
+    headers: Mapping[str, str] | None = None,
+    *,
+    timeout_seconds: int = 90,
+) -> dict[str, Any]:
     request = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), method="POST", headers={"content-type": "application/json", **(headers or {})})
     try:
-        with urllib.request.urlopen(request, timeout=90) as response:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
             decoded = json.loads(response.read().decode("utf-8"))
+    except TimeoutError as error:
+        raise RuntimeError(f"HTTP-запит не завершився за {timeout_seconds} с.") from error
     except urllib.error.HTTPError as error:
         detail = http_error_detail(error)
         suffix = f" · {detail}" if detail else ""
@@ -279,7 +290,12 @@ def run() -> int:
         body: dict[str, Any] = {"message": message, "mcpAccessToken": token}
         if session_id:
             body["sessionId"] = session_id
-        result = json_request(harness_url, body, {"authorization": f"Bearer {secret}"})
+        result = json_request(
+            harness_url,
+            body,
+            {"authorization": f"Bearer {secret}"},
+            timeout_seconds=HARNESS_REQUEST_TIMEOUT_SECONDS,
+        )
         received_id = result.get("sessionId")
         if isinstance(received_id, str):
             session_id = received_id

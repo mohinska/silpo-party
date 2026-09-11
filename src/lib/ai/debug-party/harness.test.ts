@@ -22,6 +22,16 @@ describe("AI Debug local harness", () => {
     expect(harnessFailureCodeForTool(undefined)).toBe("HARNESS_AGENT_FAILED");
   });
 
+  it("returns a safe failure when a model ignores the total timeout", async () => {
+    const model = new MockLanguageModelV4({ doGenerate: () => new Promise(() => {}) });
+
+    await expect(runDebugHarness({ message: "додай воду", mcpAccessToken: "never-return" }, {
+      model,
+      environment: { AI_DEBUG_TOTAL_TIMEOUT_MS: "20", AI_DEBUG_TOOL_TIMEOUT_MS: "1000" },
+      createGateway: () => ({ search: async () => ({ groups: [] }), inspect: async () => [], close: async () => undefined }),
+    })).rejects.toMatchObject({ code: "HARNESS_AGENT_FAILED" });
+  });
+
   it("runs the sourced recipe subagent and keeps normalized ingredients in the local session", async () => {
     const session = createDebugHarnessSession();
     const model = new MockLanguageModelV4({ doGenerate: [response("resolveRecipe", { query: "Карбонара" }), response("complete", { reply: "Рецепт готовий." })] });

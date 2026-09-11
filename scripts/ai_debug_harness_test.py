@@ -3,10 +3,13 @@ import unittest
 from contextlib import redirect_stdout
 from urllib.error import HTTPError
 
-from scripts.ai_debug_harness import authorization_url, http_error_detail, print_result, redact, require_local_harness_url
+from scripts.ai_debug_harness import HARNESS_REQUEST_TIMEOUT_SECONDS, authorization_url, http_error_detail, print_result, redact, require_local_harness_url
 
 
 class AiDebugHarnessTest(unittest.TestCase):
+    def test_local_harness_waits_longer_than_the_agent_deadline(self) -> None:
+        self.assertGreater(HARNESS_REQUEST_TIMEOUT_SECONDS, 90)
+
     def test_authorization_url_uses_pkce_and_loopback_redirect(self) -> None:
         url = authorization_url(
             client_id="client",

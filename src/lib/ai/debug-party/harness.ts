@@ -129,17 +129,33 @@ export async function runDebugHarness(input: unknown, dependencies: HarnessDepen
         activeToolName = undefined;
       },
     });
-    await agent.generate({
-      prompt: JSON.stringify({ message: request.message, cart: compactCart(session.workspace), recipeRequirements: mergedRecipeRequirements(session.workspace.recipes) }),
-      abortSignal: AbortSignal.timeout(limits.totalMs),
-      timeout: { totalMs: limits.totalMs, stepMs: limits.stepMs },
-    });
+    await finishBeforeDeadline(
+      agent.generate({
+        prompt: JSON.stringify({ message: request.message, cart: compactCart(session.workspace), recipeRequirements: mergedRecipeRequirements(session.workspace.recipes) }),
+        abortSignal: AbortSignal.timeout(limits.totalMs),
+        timeout: { totalMs: limits.totalMs, stepMs: limits.stepMs },
+      }),
+      limits.totalMs,
+      () => new DebugHarnessRunError(activeToolName),
+    );
   } catch {
     throw new DebugHarnessRunError(activeToolName);
   } finally {
     await gateway.close().catch(() => undefined);
   }
   return { sessionId: session.id, reply: reply ?? "Не вдалося завершити. Спробуйте ще раз.", cart: compactCart(session.workspace), trace: session.trace };
+}
+
+async function finishBeforeDeadline<T>(operation: Promise<T>, timeoutMs: number, timeoutError: () => Error): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(timeoutError()), timeoutMs);
+  });
+  try {
+    return await Promise.race([operation, deadline]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function createTemporaryGateway(accessToken: string): DebugCatalogGateway {
