@@ -3,6 +3,7 @@ import { createLocalCartTools, rankCandidates } from "./cart-tools";
 import { DebugPartyRepository, type DebugPartyPersistencePort } from "./repository";
 import type { DebugProductEvidence } from "./schemas";
 import type { HostCatalogAdapter, SilpoVerifiedProduct } from "../../silpo/cart";
+import type { CandidatePreselector } from "./candidate-preselector";
 
 vi.mock("server-only", () => ({}));
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: vi.fn() }));
@@ -16,7 +17,7 @@ const product = (productId = "milk", discountCents: number | null = null): Silpo
 });
 const dbRow = (input: object) => Object.fromEntries(Object.entries(input).map(([key, value]) => [key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`), value]));
 
-function setup(products = [product()]) {
+function setup(products = [product()], options: { candidatePreselector?: CandidatePreselector } = {}) {
   let revision = 2;
   const evidence = new Map<string, object>();
   const items: Record<string, unknown>[] = [];
@@ -52,18 +53,50 @@ function setup(products = [product()]) {
     calls.push(hostId);
     return operation({ search: async () => products, inspect: async (id) => products.filter((entry) => entry.productId === id) });
   };
-  const tools = createLocalCartTools({ partyId: "party", code: "ABCDEFGH", actorId: "host", hostId: "host", runId: "run", repository, catalogAdapter, now: () => new Date(now) });
+  const tools = createLocalCartTools({ partyId: "party", code: "ABCDEFGH", actorId: "host", hostId: "host", runId: "run", repository, catalogAdapter, now: () => new Date(now), ...options });
   return { tools, evidence, items, calls, repository, persistence };
 }
 
 describe("verified local cart tools", () => {
-  it("persists at most twelve bounded search results with server run/time provenance", async () => {
+  it("does not offer excluded product forms to the cart agent", async () => {
+    const ordinary = { ...product("ordinary"), name: "Молоко «Галичина» ультрапастеризоване 3,2%" };
+    const cream = { ...product("cream"), name: "Вершки «Галичина» ультрапастеризовані 10%" };
+    const coffee = { ...product("coffee"), name: "Молоко «Слов’яночка» для ідеальної пінки 2,5%" };
+    const fixture = setup([ordinary, cream, coffee], {
+      candidatePreselector: async ({ candidates }) => ({
+        normalizedIntent: { productKind: "молоко", requestedAttributes: [], exclusions: ["вершки", "для пінки"] },
+        verdicts: [
+          { evidenceId: candidates[0].evidenceId, verdict: "match", reason: "Звичайне молоко." },
+          { evidenceId: candidates[1].evidenceId, verdict: "exclude", reason: "Це вершки." },
+          { evidenceId: candidates[2].evidenceId, verdict: "exclude", reason: "Молоко для пінки не запитували." },
+        ],
+      }),
+    });
+
+    const result = await fixture.tools.searchProducts.execute({ queries: ["молоко"] });
+    expect(result.groups[0].products.map((entry) => entry.productId)).toEqual(["ordinary"]);
+    expect(result.groups[0]).toMatchObject({ excludedCount: 2, requiresAlternateSearch: false });
+    expect(fixture.evidence.size).toBe(3);
+  });
+
+  it("keeps all verified candidates unclassified when preselection fails", async () => {
+    const fixture = setup([product("ordinary"), product("cream")], {
+      candidatePreselector: async () => ({ normalizedIntent: { productKind: "молоко", requestedAttributes: [], exclusions: [] }, verdicts: [] }),
+    });
+
+    const result = await fixture.tools.searchProducts.execute({ queries: ["молоко"] });
+    expect(result.groups[0].products).toHaveLength(2);
+    expect(result.groups[0].preselection.status).toBe("invalid");
+  });
+
+  it("keeps every bounded MCP candidate and exposes its median-price context", async () => {
     const fixture = setup(Array.from({ length: 50 }, (_, i) => product(`p${i}`)));
     const result = await fixture.tools.searchProducts.execute({ queries: ["milk"] });
-    expect(result.products).toHaveLength(12);
-    expect(fixture.evidence.size).toBe(12);
+    expect(result.products).toHaveLength(30);
+    expect(fixture.evidence.size).toBe(30);
     expect([...fixture.evidence.values()][0]).toMatchObject({ party_id: "party", run_id: "run", observed_at: now, source: "catalog_search" });
     expect(result.products[0]).toMatchObject({ productId: "p0", unitPriceCents: 6000, discounted: false, available: true });
+    expect(result.groups[0]).toMatchObject({ priceContext: { candidateCount: 30, medianUnitPriceCents: 6000 } });
     expect(fixture.calls).toEqual(["host"]);
     expect(JSON.stringify(result)).not.toMatch(/run_id|raw|access_token/);
   });
@@ -123,6 +156,14 @@ describe("verified local cart tools", () => {
     const discountedPrior = { ...prior, id: "discounted", discountCents: 1000 };
     const unsuitable = { ...discountedPrior, id: "unsafe", suitable: false };
     expect(rankCandidates([catalog, prior, unsuitable, discountedPrior]).map((p) => p.id)).toEqual(["discounted", "prior", "catalog"]);
+  });
+
+  it("orders equally suitable catalog candidates by final payable price", () => {
+    const base = { ...product(), partyId: "party", runId: "run", source: "catalog_search" as const, observedAt: now, createdAt: now, suitable: true };
+    const expensive = { ...base, id: "expensive", unitPriceCents: 7500 } as DebugProductEvidence & { suitable: boolean };
+    const cheaper = { ...base, id: "cheaper", unitPriceCents: 5600 } as DebugProductEvidence & { suitable: boolean };
+
+    expect(rankCandidates([expensive, cheaper]).map((entry) => entry.id)).toEqual(["cheaper", "expensive"]);
   });
 
   it("inspects and compares only persisted evidence and completes with compact current state", async () => {

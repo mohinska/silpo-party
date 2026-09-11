@@ -2,6 +2,7 @@ import type { ToolSet } from "ai";
 import { z } from "zod";
 import type { HostCatalogAdapter, SilpoVerifiedProduct } from "../../silpo/cart";
 import type { DebugCatalogGateway } from "./catalog-gateway";
+import { preselectCandidates, type CandidatePreselection, type CandidatePreselector } from "./candidate-preselector";
 import type { CartMutation, DebugPartyRepository, DebugPartyWorkspace } from "./repository";
 import { DebugProductEvidenceSchema, type DebugProductEvidence } from "./schemas";
 
@@ -9,10 +10,11 @@ const Id = z.string().trim().min(1).max(200);
 const Revision = z.number().int().nonnegative();
 const Quantity = z.number().finite().positive().max(1000);
 const Empty = z.strictObject({});
+const MAX_CANDIDATES_PER_QUERY = 30;
 const Search = z.strictObject({ queries: z.array(z.string().trim().min(1).max(100)).min(1).max(3).refine((queries) =>
   new Set(queries.map((query) => query.toLocaleLowerCase("uk-UA"))).size === queries.length, "Search queries must be distinct.") });
 const Inspect = z.strictObject({ productId: Id });
-const Compare = z.strictObject({ evidenceIds: z.array(Id).min(1).max(12) });
+const Compare = z.strictObject({ evidenceIds: z.array(Id).min(1).max(MAX_CANDIDATES_PER_QUERY) });
 const Add = z.strictObject({ evidenceId: Id, quantity: Quantity, expectedRevision: Revision });
 const Replace = Add.extend({ itemId: Id });
 const SetQuantity = z.strictObject({ itemId: Id, quantity: Quantity, expectedRevision: Revision });
@@ -29,13 +31,25 @@ export type LocalCartToolsContext = {
   repository: Pick<DebugPartyRepository, "loadWorkspace" | "applyCartCommand" | "saveEvidence" | "findEvidence">;
   catalogGateway?: Pick<DebugCatalogGateway, "search" | "inspect">;
   catalogAdapter?: HostCatalogAdapter;
+  candidatePreselector?: CandidatePreselector;
+  selectionContext?: {
+    request: string;
+    constraints: {
+      dietaryRestrictions: string[];
+      favorites: string[];
+      recentProductNames: string[];
+    };
+  };
   now?: () => Date;
 };
 
 /** Suitability is evaluated by the caller; an unavailable product is never ranked. */
 export function rankCandidates<T extends DebugProductEvidence & { suitable: boolean }>(candidates: readonly T[]): T[] {
   const priority = (entry: T) => entry.source === "recent_purchase" ? (entry.discountCents && entry.discountCents > 0 ? 0 : 1) : 2;
-  return candidates.filter((entry) => entry.suitable && entry.available).sort((a, b) => priority(a) - priority(b));
+  return candidates.filter((entry) => entry.suitable && entry.available).sort((a, b) => {
+    const sourceDifference = priority(a) - priority(b);
+    return sourceDifference || (priority(a) === 2 ? a.unitPriceCents - b.unitPriceCents : 0);
+  });
 }
 
 function compactProduct(entry: DebugProductEvidence) {
@@ -45,6 +59,11 @@ function compactProduct(entry: DebugProductEvidence) {
     discountCents: entry.discountCents, discounted: (entry.discountCents ?? 0) > 0,
     available: entry.available, source: entry.source, observedAt: entry.observedAt,
   };
+}
+
+function compactPreselection(preselection: CandidatePreselection, evidence: DebugProductEvidence) {
+  const verdict = preselection.verdicts.find((entry) => entry.evidenceId === evidence.id);
+  return verdict ?? { evidenceId: evidence.id, verdict: "unclassified" as const, reason: "Попередній відбір недоступний." };
 }
 
 function compactCart(workspace: DebugPartyWorkspace) {
@@ -97,7 +116,7 @@ export function createLocalCartTools(context: LocalCartToolsContext) {
     const previous = new Set(state.contexts.filter((entry) => entry.contextStatus === "ready").flatMap((entry) => entry.recentProducts.map((product) => product.productId)));
     const observedAt = now().toISOString();
     const saved: DebugProductEvidence[] = [];
-    for (const product of products.slice(0, 12)) {
+    for (const product of products.slice(0, MAX_CANDIDATES_PER_QUERY)) {
       const evidence = DebugProductEvidenceSchema.parse({
         ...productFields(product), id: crypto.randomUUID(), partyId, runId,
         source: previous.has(product.productId) ? "recent_purchase" : source,
@@ -116,14 +135,51 @@ export function createLocalCartTools(context: LocalCartToolsContext) {
     if (catalogCalls >= 20) throw new Error("Catalog call budget exhausted.");
     catalogCalls += 1;
     const result = await catalogGateway.search(queries);
-    const evidenceByProduct = new Map<string, DebugProductEvidence>();
-    const groups = [];
+    const savedGroups: Array<{ query: string; products: DebugProductEvidence[] }> = [];
     for (const group of result.groups) {
       const saved = await persistProducts(state, group.products, "catalog_search");
-      for (const entry of saved) evidenceByProduct.set(entry.productId, entry);
-      groups.push({ query: group.query, products: saved.map(compactProduct) });
+      savedGroups.push({ query: group.query, products: saved });
     }
-    return { revision: state.party.cartRevision, groups, products: [...evidenceByProduct.values()].map(compactProduct) };
+    const allSaved = savedGroups.flatMap((group) => group.products);
+    const preselection = allSaved.length
+      ? await preselectCandidates({
+        request: context.selectionContext?.request ?? `Товари за запитом: ${queries.join(", ")}`,
+        queries,
+        constraints: context.selectionContext?.constraints ?? { dietaryRestrictions: [], favorites: [], recentProductNames: [] },
+        candidates: allSaved.map((entry) => ({
+          evidenceId: entry.id, productId: entry.productId, name: entry.name, unit: entry.unit,
+          unitPriceCents: entry.unitPriceCents, discountCents: entry.discountCents, available: entry.available, source: entry.source,
+        })),
+      }, context.candidatePreselector)
+      : { status: "unavailable" as const, normalizedIntent: null, verdicts: [] };
+    const evidenceByProduct = new Map<string, DebugProductEvidence>();
+    const groups = savedGroups.map((group) => {
+      const matches = group.products.filter((entry) => compactPreselection(preselection, entry).verdict === "match");
+      const partials = group.products.filter((entry) => compactPreselection(preselection, entry).verdict === "partial");
+      const visible = preselection.status === "completed" ? matches : group.products;
+      const medianSource = matches.length ? matches : visible.length ? visible : partials;
+      for (const entry of visible) evidenceByProduct.set(entry.productId, entry);
+      return {
+        query: group.query,
+        priceContext: priceContext(medianSource),
+        products: visible.map(compactProduct),
+        partials: preselection.status === "completed" ? partials.map(compactProduct) : [],
+        excludedCount: preselection.status === "completed" ? group.products.filter((entry) => compactPreselection(preselection, entry).verdict === "exclude").length : 0,
+        requiresAlternateSearch: preselection.status === "completed" && matches.length === 0,
+        preselection: {
+          status: preselection.status,
+          normalizedIntent: preselection.normalizedIntent,
+          verdicts: group.products.map((entry) => compactPreselection(preselection, entry)),
+        },
+      };
+    });
+    return {
+      revision: state.party.cartRevision,
+      groups,
+      products: [...evidenceByProduct.values()].map(compactProduct),
+      traceCandidates: allSaved.map((entry) => ({ ...compactProduct(entry), preselection: compactPreselection(preselection, entry) })),
+      preselection: { status: preselection.status, normalizedIntent: preselection.normalizedIntent },
+    };
   }
 
   async function discoverInspect(productId: string) {
@@ -152,7 +208,7 @@ export function createLocalCartTools(context: LocalCartToolsContext) {
       execute: async (input: z.infer<typeof Search>) => discoverSearch(Search.parse(input).queries) },
     inspectProduct: { description: "Inspect a known product ID with live price, promotion and availability from the Host store.", inputSchema: Inspect,
       execute: async (input: z.infer<typeof Inspect>) => discoverInspect(Inspect.parse(input).productId) },
-    compareAlternatives: { description: "Compare evidence IDs already judged suitable. Prefer discounted recent purchases, then other recent purchases, then catalog order.", inputSchema: Compare,
+    compareAlternatives: { description: "Compare at most 30 suitable evidence IDs. Results prefer discounted recent purchases, then other recent purchases; equally suitable catalog results are sorted by final payable unitPriceCents ascending. You still choose the evidence ID.", inputSchema: Compare,
       execute: async (input: z.infer<typeof Compare>) => {
         const { evidenceIds } = Compare.parse(input);
         const state = await workspace();
@@ -170,6 +226,15 @@ export function createLocalCartTools(context: LocalCartToolsContext) {
     complete: { description: "Finish this agent turn with a short Ukrainian reply and current cart state. Does not finalize or send the cart.", inputSchema: Complete,
       execute: async (input: z.infer<typeof Complete>) => { const { reply } = Complete.parse(input); return { completed: true, reply, ...compactCart(await workspace()) }; } },
   } satisfies ToolSet;
+}
+
+function priceContext(entries: readonly DebugProductEvidence[]) {
+  const prices = entries.filter((entry) => entry.available).map((entry) => entry.unitPriceCents).sort((a, b) => a - b);
+  const middle = Math.floor(prices.length / 2);
+  return {
+    candidateCount: prices.length,
+    medianUnitPriceCents: prices.length === 0 ? null : prices.length % 2 === 1 ? prices[middle] : Math.round((prices[middle - 1] + prices[middle]) / 2),
+  };
 }
 
 function productFields(product: SilpoVerifiedProduct) {
