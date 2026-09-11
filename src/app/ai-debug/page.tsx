@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { requireUser } from "@/lib/auth";
 import { PendingButton } from "@/components/pending-button";
-import { createDebugParty, joinDebugParty } from "./actions";
+import { joinPreinstalledDebugParty } from "./actions";
 import styles from "./page.module.css";
 
 export default async function AiDebugPage() {
@@ -19,25 +19,18 @@ export default async function AiDebugPage() {
             <span className={styles.brand}>AI Debug Party</span>
             <h1>Спільний кошик</h1>
             <p>
-              Створіть вечірку, запросіть друзів і напишіть у чаті, чого хочеться.
-              AI допоможе зібрати кошик для всіх.
+              Приєднуйтеся до спільної тестової вечірки й напишіть у чаті, чого хочеться.
+              Перший учасник стає Організатором.
             </p>
           </div>
         </div>
       </header>
 
-      <section className={styles.controls} aria-label="Створити або приєднатися">
-        <form action={createDebugParty}>
-          <h2>Нова вечірка</h2>
-          <p><label htmlFor="budget">Бюджет, грн · необов’язково</label></p>
-          <input id="budget" name="budget" type="number" min="0" step="0.01" placeholder="Без обмеження" />
-          <PendingButton pendingLabel="Створюємо…">Створити вечірку</PendingButton>
-        </form>
-        <form action={joinDebugParty}>
-          <h2>Маєте запрошення?</h2>
-          <p><label htmlFor="code">Код вечірки · 8 символів</label></p>
-          <input id="code" name="code" required minLength={8} maxLength={8} pattern="[A-Za-z0-9]{8}" autoCapitalize="characters" autoComplete="off" />
-          <PendingButton pendingLabel="Приєднуємося…">Приєднатися</PendingButton>
+      <section className={styles.controls} aria-label="Приєднатися до тестової вечірки">
+        <form action={joinPreinstalledDebugParty}>
+          <h2>Тестова вечірка</h2>
+          <p>Команда працює в одному спільному кошику. Посилання можна передати колегам.</p>
+          <PendingButton pendingLabel="Приєднуємося…">Приєднатися до вечірки</PendingButton>
         </form>
       </section>
     </main>

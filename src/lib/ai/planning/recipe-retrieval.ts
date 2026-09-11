@@ -3,6 +3,12 @@ import "server-only";
 import { createHash } from "node:crypto";
 import { RecipeSchema, type Recipe } from "./proposal-schemas";
 
+const RecipeRequestHeaders = {
+  "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131 Safari/537.36",
+  Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+  "Accept-Language": "uk-UA,uk;q=0.9,en;q=0.8",
+};
+
 function decodeHtml(value: string) {
   return value.replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&amp;/g, "&").replace(/&nbsp;/g, " ").replace(/&ndash;|&mdash;/g, "-").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 }
@@ -90,19 +96,52 @@ export function parseRecipeDocument(html: string, url: string): Recipe {
   const title = typeof recipeData?.name === "string" ? decodeHtml(recipeData.name) : decodeHtml(pageTitle ?? "").replace(/\s*ᐉ.*$/, "");
   let rawIngredients = Array.isArray(recipeData?.recipeIngredient) ? recipeData.recipeIngredient.filter((item): item is string => typeof item === "string") : [];
   if (!rawIngredients.length) rawIngredients = [...html.matchAll(/<li[^>]+data-autotestid=["']recipes-ingredient-item-\d+["'][^>]*>([\s\S]*?)<\/li>/giu)].map((match) => decodeHtml(match[1]));
-  const ingredients = rawIngredients.map(parseIngredient);
+  // Source pages commonly include seasoning such as “сіль за смаком”. Those
+  // lines are real, but have no purchasable quantity; retain only explicitly
+  // quantified ingredients rather than rejecting an otherwise complete recipe
+  // or inventing an amount for the seasoning.
+  const seenIngredients = new Set<string>();
+  const ingredients = rawIngredients.map(parseIngredient)
+    .filter((ingredient): ingredient is NonNullable<ReturnType<typeof parseIngredient>> => ingredient !== undefined)
+    .filter((ingredient) => {
+      const key = `${ingredient.name.toLocaleLowerCase("uk-UA")}\n${ingredient.quantity}\n${ingredient.unit}\n${ingredient.variant}`;
+      if (seenIngredients.has(key)) return false;
+      seenIngredients.add(key);
+      return true;
+    });
   const yieldText = Array.isArray(recipeData?.recipeYield) ? String(recipeData.recipeYield[0] ?? "") : String(recipeData?.recipeYield ?? html.match(/на\s+(\d+)\s+порц/iu)?.[1] ?? "");
   const servings = Number(yieldText.match(/\d+/)?.[0]);
-  if (!title || !Number.isInteger(servings) || servings <= 0 || !rawIngredients.length || ingredients.some((item) => !item)) throw new Error("The page does not contain a complete structured recipe; no recipe contents were inferred.");
+  if (!title || !Number.isInteger(servings) || servings <= 0 || !ingredients.length) throw new Error("The page does not contain a complete structured recipe; no recipe contents were inferred.");
   const parsedUrl = new URL(url);
   return RecipeSchema.parse({ id: `recipe:${encodeURIComponent(parsedUrl.href)}`, title, source: { provider: parsedUrl.hostname === "silpo.ua" || parsedUrl.hostname.endsWith(".silpo.ua") ? "silpo" : "publisher", url: parsedUrl.href, title }, baseServings: servings, ingredients });
 }
 
+function assertPublicRecipeUrl(url: string) {
+  const target = new URL(url);
+  if (target.protocol !== "https:" || target.hostname === "localhost" || target.hostname.endsWith(".local") || /^(127\.|10\.|169\.254\.|192\.168\.|0\.|::1$)/.test(target.hostname)) {
+    throw new Error("Recipe URLs must be public HTTPS pages.");
+  }
+  return target;
+}
+
+async function fetchParsedRecipe(url: string, fetcher: typeof fetch) {
+  assertPublicRecipeUrl(url);
+  const response = await fetcher(url, { cache: "no-store", headers: RecipeRequestHeaders });
+  if (!response.ok) throw new Error("The recipe source could not be retrieved.");
+  return parseRecipeDocument(await response.text(), response.url || url);
+}
+
 export async function retrieveRecipe(input: { dishName: string; requestedUrl?: string }, fetcher: typeof fetch = fetch): Promise<Recipe> {
-  let url = input.requestedUrl;
-  if (!url) {
-    const search = await fetcher(`https://silpo.ua/recipes?search=${encodeURIComponent(input.dishName)}`, { cache: "no-store" });
-    if (!search.ok) throw new Error("Silpo recipe search is unavailable.");
+  if (input.requestedUrl) {
+    const recipe = await fetchParsedRecipe(input.requestedUrl, fetcher);
+    return recipe.source.provider !== "silpo" ? { ...recipe, source: { ...recipe.source, provider: "participant" } } : recipe;
+  }
+
+  {
+    // The public `?search=` page is not a stable filtered API. Index the
+    // catalog page and rank only its actual recipe links instead.
+    const search = await fetcher("https://silpo.ua/recipes", { cache: "no-store", headers: RecipeRequestHeaders });
+    if (!search.ok) throw new Error("Silpo recipe index is unavailable.");
     const html = await search.text();
     const words = input.dishName.toLocaleLowerCase("uk-UA").match(/[\p{L}\p{N}]+/gu) ?? [];
     const links = [...html.matchAll(/<a[^>]+href=["'](\/recipes\/[a-z0-9%_-]+)["'][^>]*>([\s\S]*?)<\/a>/giu)].map((match) => ({
@@ -110,15 +149,20 @@ export async function retrieveRecipe(input: { dishName: string; requestedUrl?: s
       title: decodeHtml(match[2]).toLocaleLowerCase("uk-UA"),
     }));
     links.sort((left, right) => words.filter((word) => right.title.includes(word)).length - words.filter((word) => left.title.includes(word)).length || left.url.localeCompare(right.url));
-    url = links[0]?.url;
-    if (!url) throw new Error(`No sourced recipe was found for ${input.dishName}.`);
+    // Catalog cards can point to editorial pages without a complete ingredient
+    // list. Try a small, relevance-ranked set instead of failing on the first
+    // card; every accepted recipe is still parsed from its own source page.
+    let lastError: unknown;
+    for (const candidate of links.slice(0, 5)) {
+      try {
+        return await fetchParsedRecipe(candidate.url, fetcher);
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (lastError) throw lastError;
+    throw new Error(`No sourced recipe was found for ${input.dishName}.`);
   }
-  const target = new URL(url);
-  if (target.protocol !== "https:" || target.hostname === "localhost" || target.hostname.endsWith(".local") || /^(127\.|10\.|169\.254\.|192\.168\.|0\.|::1$)/.test(target.hostname)) throw new Error("Recipe URLs must be public HTTPS pages.");
-  const response = await fetcher(url, { cache: "no-store" });
-  if (!response.ok) throw new Error("The recipe source could not be retrieved.");
-  const recipe = parseRecipeDocument(await response.text(), response.url || url);
-  return input.requestedUrl && recipe.source.provider !== "silpo" ? { ...recipe, source: { ...recipe.source, provider: "participant" } } : recipe;
 }
 
 export async function retrieveRecipeForRequest(

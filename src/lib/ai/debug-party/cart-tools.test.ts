@@ -156,6 +156,9 @@ describe("Host catalog read adapter", () => {
       ["silpo_get_product_by_id", { productId: { type: "string" } }], ["silpo_add_products", {}],
     ] as const;
     const tools = new Map(entries.map(([name, properties]) => [name, { name, inputSchema: { type: "object", properties } }]));
+    // Catalog search is an allowlisted server-side read even when the upstream
+    // MCP advertises an overly conservative mutability annotation.
+    (tools.get("silpo_find_products_batch")! as { annotations?: { readOnlyHint?: boolean } }).annotations = { readOnlyHint: false };
     mcp.withSilpoMcp.mockImplementation(async (hostId, operation) => {
       expect(hostId).toBe("host");
       return operation({ callTool: async ({ name }: { name: string }) => {

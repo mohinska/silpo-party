@@ -21,11 +21,6 @@ export function assembleDebugPartyApplication({ repository, supervise, send }: A
   }
 
   return {
-    async createParty(actorId: string, budgetCents: number | null) {
-      const code = await repository.createParty(actorId);
-      if (budgetCents !== null) await repository.saveBudget(code, actorId, budgetCents);
-      return code;
-    },
     joinParty: (code: string, actorId: string) => repository.joinParty(code, actorId),
     loadWorkspace: (code: string, actorId: string) => repository.loadWorkspace(code, actorId),
     saveBudget: (code: string, actorId: string, budgetCents: number | null) => repository.saveBudget(code, actorId, budgetCents),
@@ -52,6 +47,11 @@ export function assembleDebugPartyApplication({ repository, supervise, send }: A
     async finalizeParty(code: string, actorId: string) {
       await requireHost(code, actorId);
       return repository.finalizeParty(code, actorId);
+    },
+
+    async clearParty(code: string, actorId: string) {
+      await requireHost(code, actorId);
+      await repository.clearParty(code, actorId);
     },
 
     async sendCart(code: string, actorId: string, confirmChanges: boolean) {

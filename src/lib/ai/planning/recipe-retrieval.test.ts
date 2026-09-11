@@ -83,6 +83,36 @@ describe("recipe provenance", () => {
     ]);
   });
 
+  it("keeps quantified source ingredients while skipping taste-only notes", () => {
+    const html = `<h1>Карбонара</h1><p>на 2 порції</p><ul>
+      <li data-autotestid="recipes-ingredient-item-0">Спагеті <span>100 г</span></li>
+      <li data-autotestid="recipes-ingredient-item-1">Яйця <span>3 шт</span></li>
+      <li data-autotestid="recipes-ingredient-item-2">Сіль <span>за смаком</span></li>
+      <li data-autotestid="recipes-ingredient-item-3">Перець чорний мелений <span>за смаком</span></li>
+    </ul>`;
+
+    expect(parseRecipeDocument(html, "https://silpo.ua/recipes/karbonara")).toMatchObject({
+      title: "Карбонара", ingredients: [
+        { name: "Спагеті", quantity: 100, unit: "g" },
+        { name: "Яйця", quantity: 3, unit: "piece" },
+      ],
+    });
+  });
+
+  it("deduplicates quantified source facts repeated in recipe steps", () => {
+    const html = `<h1>Карбонара</h1><p>на 2 порції</p><ul>
+      <li data-autotestid="recipes-ingredient-item-0">Спагеті <span>100 г</span></li>
+      <li data-autotestid="recipes-ingredient-item-1">Яйця <span>3 шт</span></li>
+      <li data-autotestid="recipes-ingredient-item-2">Спагеті <span>100 г</span></li>
+      <li data-autotestid="recipes-ingredient-item-3">Яйця <span>3 шт</span></li>
+    </ul>`;
+
+    expect(parseRecipeDocument(html, "https://silpo.ua/recipes/karbonara").ingredients).toEqual([
+      { name: "Спагеті", quantity: 100, unit: "g", variant: "standard", optional: false },
+      { name: "Яйця", quantity: 3, unit: "piece", variant: "standard", optional: false },
+    ]);
+  });
+
   it("rejects incomplete pages instead of inferring recipe contents", () => {
     expect(() => parseRecipeDocument("<h1>Паста</h1>", "https://silpo.ua/recipes/pasta")).toThrow(/no recipe contents were inferred/i);
   });
@@ -92,11 +122,25 @@ describe("recipe provenance", () => {
     const fetcher = vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
       fetched.push(url);
-      if (url.includes("?search=")) return new Response('<a href="/recipes/pica"><span>Шкільна піца</span></a><a href="/recipes/pasta"><span>Паста болоньєзе</span></a>', { status: 200 });
+      if (url === "https://silpo.ua/recipes") return new Response('<a href="/recipes/pica"><span>Шкільна піца</span></a><a href="/recipes/pasta"><span>Паста болоньєзе</span></a>', { status: 200 });
       return new Response('<h1>Паста болоньєзе</h1><p>на 2 порції</p><li data-autotestid="recipes-ingredient-item-0">Паста <span>300 г</span></li>', { status: 200, headers: { "Content-Type": "text/html" } });
     });
     const recipe = await retrieveRecipe({ dishName: "паста" }, fetcher as typeof fetch);
     expect(recipe.title).toBe("Паста болоньєзе");
     expect(fetched[1]).toBe("https://silpo.ua/recipes/pasta");
+  });
+
+  it("tries the next relevant source card when the first one has no complete recipe", async () => {
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === "https://silpo.ua/recipes") return new Response('<a href="/recipes/first"><span>Паста карбонара</span></a><a href="/recipes/second"><span>Паста карбонара класична</span></a>', { status: 200 });
+      if (url.endsWith("/first")) return new Response("<h1>Паста карбонара</h1>", { status: 200 });
+      return new Response('<h1>Паста карбонара класична</h1><p>на 2 порції</p><li data-autotestid="recipes-ingredient-item-0">Паста <span>300 г</span></li>', { status: 200 });
+    });
+
+    await expect(retrieveRecipe({ dishName: "паста карбонара" }, fetcher as typeof fetch)).resolves.toMatchObject({ title: "Паста карбонара класична" });
+    expect(fetcher).toHaveBeenCalledWith("https://silpo.ua/recipes/second", expect.objectContaining({
+      cache: "no-store", headers: expect.objectContaining({ "Accept-Language": "uk-UA,uk;q=0.9,en;q=0.8" }),
+    }));
   });
 });

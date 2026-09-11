@@ -64,12 +64,12 @@ describe("DebugPartyRepository", () => {
       party: { ...party, cart_stale: true }, members: [hostMember], intents: [], contexts: [], cartItems: [],
       runs: [{ id: "run-1", actor_id: "user-host", mode: "chat", status: "running", created_at: now, error: "secret error", prompt: "secret prompt" }],
       toolEvents: [{ id: "event-1", run_id: "run-1", tool_name: "searchProducts", status: "completed", duration_ms: 10, created_at: now,
-        metadata: { count: 3, token: "secret" }, output: "secret output" }],
+        metadata: { count: 3, mcpTool: "silpo_find_products_batch", errorCode: "MCP_429", token: "secret" }, output: "secret output" }],
     }) }));
     const workspace = await repository.loadWorkspace("ABCDEFGH", "user-host");
     expect(workspace.cartStale).toBe(true);
     expect(workspace.runs).toEqual([{ id: "run-1", actorId: "user-host", mode: "chat", status: "running", createdAt: now }]);
-    expect(workspace.toolEvents).toEqual([{ id: "event-1", runId: "run-1", toolName: "searchProducts", status: "completed", durationMs: 10, createdAt: now, count: 3 }]);
+    expect(workspace.toolEvents).toEqual([{ id: "event-1", runId: "run-1", toolName: "searchProducts", status: "completed", durationMs: 10, createdAt: now, count: 3, mcpTool: "silpo_find_products_batch", errorCode: "MCP_429" }]);
     expect(JSON.stringify(workspace)).not.toContain("secret");
   });
 

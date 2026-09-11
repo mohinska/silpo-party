@@ -2,8 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const dependencies = vi.hoisted(() => ({
   requireUser: vi.fn(),
-  createParty: vi.fn(), joinParty: vi.fn(), saveBudget: vi.fn(),
-  sendMessage: vi.fn(), buildBasket: vi.fn(), finalizeParty: vi.fn(), sendCart: vi.fn(),
+  joinParty: vi.fn(), saveBudget: vi.fn(),
+  sendMessage: vi.fn(), buildBasket: vi.fn(), finalizeParty: vi.fn(), clearParty: vi.fn(), sendCart: vi.fn(),
   revalidatePath: vi.fn(),
 }));
 vi.mock("@/lib/auth", () => ({ requireUser: dependencies.requireUser }));
@@ -25,14 +25,13 @@ function form(fields: Record<string, string>) {
 beforeEach(() => {
   vi.resetAllMocks();
   dependencies.requireUser.mockResolvedValue({ id: "session-user" });
-  dependencies.createParty.mockResolvedValue("AB12CD34");
   dependencies.joinParty.mockResolvedValue("AB12CD34");
 });
 
 describe("debug party actions", () => {
-  it("creates a persistent invite with an unset optional budget", async () => {
-    await expect(actions.createDebugParty(form({ budget: " " }))).rejects.toThrow("redirect:/ai-debug/party/AB12CD34");
-    expect(dependencies.createParty).toHaveBeenCalledWith("session-user", null);
+  it("joins the preinstalled party and redirects to its stable workspace", async () => {
+    await expect(actions.joinPreinstalledDebugParty()).rejects.toThrow("redirect:/ai-debug/party/AB12CD34");
+    expect(dependencies.joinParty).toHaveBeenCalledWith("AIDEBUG1", "session-user");
   });
 
   it("normalizes an eight-character invite without losing it in the redirect", async () => {
@@ -48,11 +47,6 @@ describe("debug party actions", () => {
   it("converts a decimal hryvnia budget into exact integer cents", async () => {
     await actions.saveDebugBudget(form({ code: "AB12CD34", budget: "1250.50" }));
     expect(dependencies.saveBudget).toHaveBeenCalledWith("AB12CD34", "session-user", 125050);
-  });
-
-  it.each(["-1", "1.001", "Infinity", "12abc"])("rejects invalid budget %s", async (budget) => {
-    await expect(actions.createDebugParty(form({ budget }))).rejects.toThrow();
-    expect(dependencies.createParty).not.toHaveBeenCalled();
   });
 
   it("sends trimmed chat as the authenticated user and refreshes the workspace", async () => {
@@ -84,5 +78,11 @@ describe("debug party actions", () => {
     expect(dependencies.sendCart).toHaveBeenCalledWith("AB12CD34", "session-user", false);
     await actions.sendDebugCartToSilpo(form({ code: "AB12CD34", confirmChanges: "true" }));
     expect(dependencies.sendCart).toHaveBeenLastCalledWith("AB12CD34", "session-user", true);
+  });
+
+  it("clears a party only through the authenticated server action", async () => {
+    await actions.clearDebugParty(form({ code: "AB12CD34" }));
+    expect(dependencies.clearParty).toHaveBeenCalledWith("AB12CD34", "session-user");
+    expect(dependencies.revalidatePath).toHaveBeenCalledWith("/ai-debug/party/AB12CD34");
   });
 });

@@ -13,13 +13,13 @@ function setup(actor = "host") {
   const events: string[] = [];
   const repository = {
     loadWorkspace: async () => state,
-    createParty: async () => { events.push("create"); return "AB12CD34"; },
     saveBudget: async (_code: string, _actor: string, cents: number | null) => { events.push(`budget:${cents}`); },
     appendChatMessage: async (_code: string, actorId: string, content: string) => {
       events.push(`message:${actorId}:${content}`);
       return { id: "message", partyId: "party", participantId: actorId, content, role: "user" };
     },
     finalizeParty: async () => { events.push("finalize"); return "snapshot"; },
+    clearParty: async () => { events.push("clear"); },
     persistAssistantReply: async () => { events.push("reply"); },
   } as unknown as DebugPartyRepository;
   const supervise = vi.fn<typeof runDebugPartySupervisor>(async () => { events.push("supervise"); return { runId: "run", reply: "Готово", status: "completed" as const }; });
@@ -28,12 +28,6 @@ function setup(actor = "host") {
 }
 
 describe("debug party application", () => {
-  it("creates a stable party before applying an optional Host budget", async () => {
-    const { application, events } = setup();
-    expect(await application.createParty("host", 10050)).toBe("AB12CD34");
-    expect(events).toEqual(["create", "budget:10050"]);
-  });
-
   it("persists the user's first message before starting the chat supervisor", async () => {
     const { application, events, supervise } = setup("guest");
     await application.sendMessage("AB12CD34", "guest", "Хочу піцу");
@@ -45,5 +39,14 @@ describe("debug party application", () => {
     const { application, events } = setup("guest");
     await expect(application[method]("AB12CD34", "guest", false)).rejects.toThrow(/Host/);
     expect(events).toEqual([]);
+  });
+
+  it("allows only the Host to clear a reusable party", async () => {
+    const host = setup("host");
+    const guest = setup("guest");
+
+    await expect((guest.application as { clearParty: (code: string, actorId: string) => Promise<void> }).clearParty("AB12CD34", "guest")).rejects.toThrow(/Host/);
+    await expect((host.application as { clearParty: (code: string, actorId: string) => Promise<void> }).clearParty("AB12CD34", "host")).resolves.toBeUndefined();
+    expect(host.events).toContain("clear");
   });
 });

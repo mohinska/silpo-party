@@ -5,10 +5,11 @@ import { runDebugPartySupervisor, type SupervisorDependencies } from "./supervis
 import type { DebugPartyWorkspace } from "./repository";
 import { readToolData } from "../../silpo/tool-data";
 
-const { rawCall, withMcp } = vi.hoisted(() => ({ rawCall: vi.fn(), withMcp: vi.fn() }));
+const { rawCall, withMcp, retrieveRecipe } = vi.hoisted(() => ({ rawCall: vi.fn(), withMcp: vi.fn(), retrieveRecipe: vi.fn() }));
 vi.mock("server-only", () => ({}));
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: vi.fn() }));
 vi.mock("@/lib/silpo/mcp", () => ({ withSilpoMcp: withMcp, readToolData: (value: unknown) => readToolData(value) }));
+vi.mock("../planning/recipe-retrieval", () => ({ retrieveRecipe }));
 
 const now = "2026-09-10T12:00:00.000Z";
 function response(toolName: string, input: object = {}): LanguageModelV4GenerateResult {
@@ -23,7 +24,7 @@ function setup(outputs = [response("complete", { reply: "Кошик готови
   const context = { id: "context", partyId: "party", participantId: "host", intentRevision: 1, contextStatus: "ready" as const,
     purchaseHistoryStatus: "unavailable" as const, dietaryRestrictions: [], favorites: [], recentProducts: [], summary: "Овочі", collectedAt: now, createdAt: now, updatedAt: now };
   const workspace: DebugPartyWorkspace = { party: { id: "party", code: "ABCDEFGH", hostId: "host", status: "ready", budgetCents: 10000, cartRevision: 0, createdAt: now, updatedAt: now },
-    member, members: [member], intents: [{ id: "intent", partyId: "party", participantId: "host", revision: 1, request: "Овочі", createdAt: now, updatedAt: now }], contexts: [context], cartItems: [] };
+    member, members: [member], intents: [{ id: "intent", partyId: "party", participantId: "host", revision: 1, request: "Овочі", createdAt: now, updatedAt: now }], contexts: [context], cartItems: [], recipes: [] };
   const events: unknown[] = [];
   const finishes: unknown[] = [];
   const model = new MockLanguageModelV4({ doGenerate: outputs });
@@ -32,6 +33,11 @@ function setup(outputs = [response("complete", { reply: "Кошик готови
     appendToolEvent: vi.fn(async (event) => { events.push(event); }),
     completeRun: vi.fn(async (event) => { finishes.push(event); }),
     replaceContext: vi.fn(async ({ context: value }) => value),
+    saveRecipe: vi.fn(async ({ recipe }) => {
+      const saved = { id: "recipe-row", ...recipe, createdAt: now, updatedAt: now };
+      workspace.recipes = [...workspace.recipes, saved];
+      return saved;
+    }),
     findEvidence: vi.fn(async () => null), saveEvidence: vi.fn(async ({ evidence }) => evidence), applyCartCommand: vi.fn() };
   const personalAgent = vi.fn(async () => context);
   const dependencies: SupervisorDependencies = { code: "ABCDEFGH", actorId: "host", model,
@@ -113,12 +119,53 @@ describe("debug party supervisor", () => {
     await runDebugPartySupervisor({ ...build, mode: "chat", messageId: "message" }, chat.dependencies);
     const names = f.model.doGenerateCalls[0].tools?.map((tool) => tool.name);
     expect(names).toContain("addProduct");
+    expect(names).toContain("resolveRecipe");
     expect(names).not.toContain("writeSilpoCart");
     expect(names).toEqual(chat.model.doGenerateCalls[0].tools?.map((tool) => tool.name));
     expect(first.reply.length).toBeLessThanOrEqual(240);
     expect(first.status).toBe("completed");
     expect(JSON.stringify([first, f.events, f.finishes])).not.toContain("PRIVATE REASONING");
     expect(f.events).toEqual(expect.arrayContaining([expect.objectContaining({ toolName: "complete", status: "completed" })]));
+  });
+
+  it("runs recipe facts through the isolated recipe subagent before exposing them to the cart agent", async () => {
+    const f = setup([response("resolveRecipe", { query: "Карбонара" }), response("complete", { reply: "Рецепт додано." })]);
+    retrieveRecipe.mockResolvedValue({
+      id: "recipe", title: "Карбонара", source: { provider: "silpo", title: "Карбонара" }, baseServings: 2,
+      ingredients: [{ name: "Спагеті", quantity: 100, unit: "g", variant: "standard", optional: false }],
+    });
+    const normalizer = vi.fn(async () => ({ include: [{ sourceIndex: 0, optional: false }] }));
+    (f.dependencies as SupervisorDependencies & { recipeNormalizer: typeof normalizer }).recipeNormalizer = normalizer;
+
+    await runDebugPartySupervisor(build, f.dependencies);
+
+    expect(normalizer).toHaveBeenCalledWith(expect.objectContaining({ recipe: expect.objectContaining({ title: "Карбонара" }) }));
+    expect(f.repository.saveRecipe).toHaveBeenCalledWith(expect.objectContaining({ recipe: expect.objectContaining({ ingredients: [expect.objectContaining({ name: "Спагеті", quantity: 100, unit: "g" })] }) }));
+    expect(JSON.stringify(f.model.doGenerateCalls[1].prompt)).toContain('"partyRequirements":[{"name":"Спагеті","quantity":100,"unit":"g"');
+  });
+
+  it("persists a safe failing Silpo MCP method and code in the debug event", async () => {
+    const f = setup([response("searchProducts", { query: "вода" }), response("complete", { reply: "Пошук тимчасово недоступний." })]);
+    f.dependencies.catalogAdapter = async () => { throw new Error("MCP_READ:silpo_find_products_batch:MCP_503"); };
+
+    await runDebugPartySupervisor(build, f.dependencies);
+
+    expect(f.events).toContainEqual(expect.objectContaining({
+      toolName: "searchProducts", status: "failed", metadata: { mcpTool: "silpo_find_products_batch", errorCode: "MCP_503" },
+    }));
+  });
+
+  it("reads safe MCP metadata from a wrapped upstream error", async () => {
+    const f = setup([response("searchProducts", { query: "вода" }), response("complete", { reply: "Пошук тимчасово недоступний." })]);
+    f.dependencies.catalogAdapter = async () => {
+      throw new Error("Catalog read failed", { cause: new Error("MCP_READ:silpo_find_products_batch:MCP_503") });
+    };
+
+    await runDebugPartySupervisor(build, f.dependencies);
+
+    expect(f.events).toContainEqual(expect.objectContaining({
+      toolName: "searchProducts", status: "failed", metadata: { mcpTool: "silpo_find_products_batch", errorCode: "MCP_503" },
+    }));
   });
 
   it("stops at the step limit without claiming success", async () => {

@@ -4,7 +4,7 @@ import { useActionState } from "react";
 import type { DebugPartyWorkspace } from "@/lib/ai/debug-party/repository";
 import type { SendResult } from "@/lib/ai/debug-party/send-to-silpo";
 import { deriveSendUi } from "@/lib/ai/debug-party/ui-state";
-import { buildDebugBasket, finalizeDebugParty, saveDebugBudget, sendDebugCartToSilpo } from "../../actions";
+import { buildDebugBasket, clearDebugParty, finalizeDebugParty, saveDebugBudget, sendDebugCartToSilpo } from "../../actions";
 import type { WorkspaceUi } from "./workspace-client";
 import styles from "../../page.module.css";
 
@@ -14,6 +14,7 @@ function HostControls({ workspace, ui }: { workspace: DebugPartyWorkspace; ui: W
   const [result, action, pending] = useActionState(async (_previous: string, data: FormData) => {
     try {
       if (data.get("operation") === "finalize") { await finalizeDebugParty(data); return "Кошик фіналізовано."; }
+      if (data.get("operation") === "clear") { await clearDebugParty(data); return "Вечірку очищено. Учасники можуть починати новий сценарій."; }
       const built = await buildDebugBasket(data);
       return built.status === "failed" ? "Не вдалося перебудувати кошик. Спробуйте ще раз." : "Кошик оновлено.";
     } catch { return "Дію не завершено. Оновіть сторінку та повторіть спробу."; }
@@ -22,7 +23,8 @@ function HostControls({ workspace, ui }: { workspace: DebugPartyWorkspace; ui: W
     <input type="hidden" name="code" value={workspace.party.code} />
     <p>Керує організатор</p>
     <div><button name="operation" value="build" className={styles.secondaryButton} disabled={pending || ui.buildDisabled}>Перебудувати</button><button name="operation" value="finalize" className={styles.primaryButton} disabled={pending || ui.finalizeDisabled}>Фіналізувати</button></div>
-    <small>Перебудувати — заново зібрати кошик для всіх. Після фіналізації його не можна змінити.</small>
+    <button name="operation" value="clear" className={styles.secondaryButton} disabled={pending} onClick={(event) => { if (!window.confirm("Очистити чат, кошик і журнал для всіх учасників? Учасники та бюджет залишаться.")) event.preventDefault(); }}>Очистити вечірку</button>
+    <small>Очищення прибирає чат, локальний кошик і журнал. Учасники та бюджет залишаються.</small>
     {(pending || result) && <p role="status">{pending ? "Оновлюємо кошик…" : result}</p>}
   </form>;
 }
