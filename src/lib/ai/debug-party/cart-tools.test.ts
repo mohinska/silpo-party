@@ -148,6 +148,14 @@ describe("verified local cart tools", () => {
 });
 
 describe("Host catalog read adapter", () => {
+  it("labels a rejected MCP connection as the session stage for the debug log", async () => {
+    mcp.withSilpoMcp.mockRejectedValueOnce(new Error("MCP transport rejected (403)"));
+    const { withSilpoCatalogReader } = await import("../../silpo/cart");
+
+    await expect(withSilpoCatalogReader("host", async () => [])).rejects
+      .toThrow("MCP_READ:silpo_mcp_session:MCP_403");
+  });
+
   it("uses only advertised reads and retains verified price, discount, availability and store identity", async () => {
     const calls: string[] = [];
     const entries = [

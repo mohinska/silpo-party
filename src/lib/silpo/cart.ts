@@ -349,7 +349,7 @@ export const withSilpoCatalogReader = async <T>(
   operation: (reader: SilpoCatalogReader) => Promise<T>,
   beforeRead?: () => void,
 ): Promise<T> => {
-  let stage = "silpo_session";
+  let stage = "silpo_mcp_session";
   return withSilpoMcp(hostId, async (client, advertised) => {
   // The external annotation is advisory and currently labels
   // silpo_find_products_batch as non-read-only. This adapter never lets the
