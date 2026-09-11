@@ -3,6 +3,7 @@ import { MockLanguageModelV4 } from "ai/test";
 import type { LanguageModelV4GenerateResult } from "@ai-sdk/provider";
 import { createDebugHarnessSession, runDebugHarness } from "./harness";
 import type { CandidatePreselector } from "./candidate-preselector";
+import type { RecipeNormalizer } from "../planning/recipe-agent";
 
 vi.mock("server-only", () => ({}));
 
@@ -15,6 +16,31 @@ function response(toolName: string, input: object): LanguageModelV4GenerateResul
 }
 
 describe("AI Debug local harness", () => {
+  it("runs the sourced recipe subagent and keeps normalized ingredients in the local session", async () => {
+    const session = createDebugHarnessSession();
+    const model = new MockLanguageModelV4({ doGenerate: [response("resolveRecipe", { query: "Карбонара" }), response("complete", { reply: "Рецепт готовий." })] });
+    const recipeNormalizer: RecipeNormalizer = async () => ({ include: [{ sourceIndex: 0, optional: false }, { sourceIndex: 1, optional: false }] });
+    const result = await runDebugHarness({ message: "зробімо карбонару", mcpAccessToken: "never-return" }, {
+      session,
+      model,
+      recipeNormalizer,
+      retrieveRecipe: async () => ({
+        id: "carbonara", title: "Карбонара", source: { provider: "silpo", title: "Карбонара", url: "https://silpo.ua/recipes/carbonara" }, baseServings: 2,
+        ingredients: [
+          { name: "Спагеті", quantity: 200, unit: "g", variant: "standard", optional: false },
+          { name: "Бекон", quantity: 150, unit: "g", variant: "standard", optional: false },
+        ],
+      }),
+      createGateway: () => ({ search: async () => ({ groups: [] }), inspect: async () => [], close: async () => undefined }),
+    } as never);
+
+    expect(result.trace[0]).toMatchObject({ toolName: "resolveRecipe", status: "completed" });
+    expect(result.trace[0].recipe).toMatchObject({ title: "Карбонара", sourceUrl: "https://silpo.ua/recipes/carbonara" });
+    expect(result.trace[0].recipe?.ingredients[0]).toMatchObject({ name: "Спагеті", quantity: 200, unit: "g" });
+    expect(session.workspace.recipes).toHaveLength(1);
+    expect(JSON.stringify(result)).not.toMatch(/never-return|access_token|authorization|raw/i);
+  });
+
   it("returns safe candidate-preselection verdicts from ephemeral state", async () => {
     const model = new MockLanguageModelV4({ doGenerate: [response("searchProducts", { queries: ["вода"] }), response("complete", { reply: "Воду знайдено." })] });
     const candidatePreselector = vi.fn<CandidatePreselector>(async ({ candidates }) => ({

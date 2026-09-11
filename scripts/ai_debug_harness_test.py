@@ -52,6 +52,24 @@ class AiDebugHarnessTest(unittest.TestCase):
         self.assertIn("Обраний evidence: evidence", report)
         self.assertIn("Кошик · версія 1 · разом 30,00 ₴", report)
 
+    def test_human_report_renders_sourced_recipe_without_raw_payload(self) -> None:
+        output = io.StringIO()
+        with redirect_stdout(output):
+            print_result({
+                "reply": "Рецепт додано.",
+                "trace": [{"toolName": "resolveRecipe", "status": "completed", "durationMs": 85, "selectedEvidenceId": None, "errorCode": None, "trace": None,
+                           "recipe": {"title": "Карбонара", "sourceUrl": "https://silpo.ua/recipes/carbonara", "servings": 2,
+                                      "ingredients": [{"name": "Спагеті", "quantity": 200, "unit": "g", "optional": False}, {"name": "Сіль", "quantity": 1, "unit": "piece", "optional": False}],
+                                      "raw": {"authorization": "private"}}}],
+                "cart": {"revision": 0, "totalCents": 0, "items": []},
+            })
+
+        report = output.getvalue()
+        self.assertIn("Рецепт: Карбонара · 2 порц.", report)
+        self.assertIn("Джерело: https://silpo.ua/recipes/carbonara", report)
+        self.assertIn("• Спагеті · 200 г", report)
+        self.assertNotIn("private", report)
+
 
 if __name__ == "__main__":
     unittest.main()

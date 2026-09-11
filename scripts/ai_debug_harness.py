@@ -196,6 +196,22 @@ def print_result(result: Mapping[str, Any]) -> None:
                             print(f"     Відбір: {verdict.get('verdict', '—')} · {verdict.get('reason', '—')}")
                 else:
                     print("   Кандидати: немає.")
+        recipe = event.get("recipe")
+        if isinstance(recipe, Mapping):
+            title = recipe.get("title", "—")
+            servings = recipe.get("servings", "—")
+            print(f"   Рецепт: {title} · {servings} порц.")
+            source_url = recipe.get("sourceUrl")
+            if isinstance(source_url, str):
+                print(f"   Джерело: {source_url}")
+            ingredients = recipe.get("ingredients")
+            if isinstance(ingredients, list):
+                for ingredient in ingredients:
+                    if not isinstance(ingredient, Mapping):
+                        continue
+                    optional = " · необов’язково" if ingredient.get("optional") is True else ""
+                    unit = {"g": "г", "kg": "кг", "ml": "мл", "l": "л", "piece": "шт", "tbsp": "ст. л.", "tsp": "ч. л."}.get(ingredient.get("unit"), ingredient.get("unit", "—"))
+                    print(f"   • {ingredient.get('name', '—')} · {ingredient.get('quantity', '—')} {unit}{optional}")
         selected = event.get("selectedEvidenceId")
         if isinstance(selected, str):
             print(f"   Обраний evidence: {selected}")

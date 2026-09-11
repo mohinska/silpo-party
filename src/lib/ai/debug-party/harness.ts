@@ -6,6 +6,10 @@ import { createDebugCatalogGateway, type DebugCatalogGateway } from "./catalog-g
 import { catalogSearchTrace, CatalogTraceSchema } from "./catalog-trace";
 import { createLocalCartTools } from "./cart-tools";
 import type { CandidatePreselector } from "./candidate-preselector";
+import { retrieveRecipe } from "../planning/recipe-retrieval";
+import { createRecipeNormalizer, normalizeRecipeForCart, type RecipeNormalizer } from "../planning/recipe-agent";
+import type { Recipe } from "../planning/proposal-schemas";
+import { mergedRecipeRequirements } from "./recipe-ledger";
 import type { CartMutation, DebugPartyRepository, DebugPartyWorkspace } from "./repository";
 import { createDebugCandidatePreselector, createDebugPartyModel, resolveDebugPartyLimits, type DebugPartyEnvironment } from "./provider";
 import type { DebugCartItem, DebugProductEvidence } from "./schemas";
@@ -21,6 +25,14 @@ const HarnessTraceSchema = z.strictObject({
   trace: CatalogTraceSchema.nullable(),
   selectedEvidenceId: z.string().trim().min(1).max(200).nullable(),
   errorCode: z.string().regex(/^[A-Z0-9_-]{1,80}$/).nullable(),
+  recipe: z.object({
+    title: z.string().trim().min(1).max(300),
+    sourceUrl: z.url().nullable(),
+    servings: z.number().int().positive(),
+    ingredients: z.array(z.strictObject({
+      name: z.string().trim().min(1).max(160), quantity: z.number().finite().positive(), unit: z.enum(["g", "kg", "ml", "l", "piece", "tbsp", "tsp"]), optional: z.boolean(),
+    })).min(1).max(100),
+  }).nullable(),
 });
 
 export type DebugHarnessTrace = z.infer<typeof HarnessTraceSchema>;
@@ -37,12 +49,14 @@ type HarnessDependencies = {
   environment?: DebugPartyEnvironment;
   createGateway?: (accessToken: string) => DebugCatalogGateway;
   candidatePreselector?: CandidatePreselector;
+  recipeNormalizer?: RecipeNormalizer;
+  retrieveRecipe?: (input: { dishName: string; requestedUrl?: string }) => Promise<Recipe>;
 };
 
 const PARTY_ID = "harness-party";
 const ACTOR_ID = "harness-user";
 const PARTY_CODE = "HARNESS1";
-const instructions = `You are the local AI Debug basket agent. Use searchProducts for every product request, select evidence IDs from its verified candidates based on the user's message, then mutate only the local cart. Never invent products, prices, availability, IDs, or cart revisions. unitPriceCents is the final payable price for one unit; discountCents is only a saving from the former price, so never subtract it from unitPriceCents. For a generic request with multiple suitable catalog products, call compareAlternatives before choosing. searchProducts provides medianUnitPriceCents; choose a normal matching product at or below that median rather than automatically choosing the lowest price. You may use general quality judgement from verified names and brands, but never invent ratings or popularity. Search products are semantic matches; do not use partial products while a match exists. If requiresAlternateSearch is true, use different search terms. Use one to three short alternative queries in a batch. Finish every turn with complete and a short Ukrainian reply.`;
+const instructions = `You are the local AI Debug basket agent. Use searchProducts for every product request, select evidence IDs from its verified candidates based on the user's message, then mutate only the local cart. Never invent products, prices, availability, IDs, or cart revisions. unitPriceCents is the final payable price for one unit; discountCents is only a saving from the former price, so never subtract it from unitPriceCents. For a generic request with multiple suitable catalog products, call compareAlternatives before choosing. searchProducts provides medianUnitPriceCents; choose a normal matching product at or below that median rather than automatically choosing the lowest price. You may use general quality judgement from verified names and brands, but never invent ratings or popularity. Search products are semantic matches; do not use partial products while a match exists. If requiresAlternateSearch is true, use different search terms. For an explicit dish or recipe URL, call resolveRecipe before product search. It returns only sourced, normalized ingredients. Use partyRequirements and the current cart to search only for missing requirements. Use one to three short alternative queries in a batch. Finish every turn with complete and a short Ukrainian reply.`;
 
 export function createDebugHarnessSession(): DebugHarnessSession {
   const timestamp = new Date().toISOString();
@@ -80,7 +94,26 @@ export async function runDebugHarness(input: unknown, dependencies: HarnessDepen
       return { completed: true, reply };
     },
   };
-  const agentTools: ToolSet = { ...tools, complete };
+  const resolveRecipe = {
+    description: "Retrieve one sourced recipe and its normalized grocery ingredients. This does not mutate a Silpo cart.",
+    inputSchema: z.strictObject({ query: z.string().trim().min(1).max(200), url: z.url().optional() }),
+    execute: async ({ query, url }: { query: string; url?: string }) => {
+      const sourceRecipe = await (dependencies.retrieveRecipe ?? retrieveRecipe)({ dishName: query, requestedUrl: url });
+      const normalized = await normalizeRecipeForCart(sourceRecipe, dependencies.recipeNormalizer ?? createRecipeNormalizer(dependencies.environment));
+      const timestamp = new Date().toISOString();
+      const saved = {
+        id: crypto.randomUUID(), partyId: PARTY_ID, recipeId: normalized.id, title: normalized.title, sourceUrl: normalized.source.url ?? null,
+        baseServings: normalized.baseServings, ingredients: normalized.ingredients, createdAt: timestamp, updatedAt: timestamp,
+      };
+      session.workspace.recipes = [...session.workspace.recipes.filter((recipe) => recipe.recipeId !== saved.recipeId), saved];
+      return {
+        title: saved.title, sourceUrl: saved.sourceUrl, servings: saved.baseServings,
+        ingredients: saved.ingredients.map(({ name, quantity, unit, optional }) => ({ name, quantity, unit, optional })),
+        partyRequirements: mergedRecipeRequirements(session.workspace.recipes),
+      };
+    },
+  };
+  const agentTools: ToolSet = { ...tools, resolveRecipe, complete };
   try {
     const agent = new ToolLoopAgent<never, ToolSet>({
       model, instructions, tools: agentTools, activeTools: Object.keys(agentTools), toolOrder: Object.keys(agentTools), maxRetries: 0,
@@ -96,7 +129,7 @@ export async function runDebugHarness(input: unknown, dependencies: HarnessDepen
       },
     });
     await agent.generate({
-      prompt: JSON.stringify({ message: request.message, cart: compactCart(session.workspace) }),
+      prompt: JSON.stringify({ message: request.message, cart: compactCart(session.workspace), recipeRequirements: mergedRecipeRequirements(session.workspace.recipes) }),
       abortSignal: AbortSignal.timeout(limits.totalMs),
       timeout: { totalMs: limits.totalMs, stepMs: limits.stepMs },
     });
@@ -178,16 +211,20 @@ function traceMetadata(toolName: string, input: unknown, toolOutput: unknown) {
     const error = "error" in toolOutput ? toolOutput.error : undefined;
     const message = error instanceof Error ? error.message : "";
     const match = message.match(/^MCP_READ:silpo_[a-z0-9_]{1,120}:(MCP_[A-Z0-9_-]{1,80})$/);
-    return { trace: null, selectedEvidenceId, errorCode: match?.[1] ?? "TOOL_OPERATION_FAILED" };
+    return { trace: null, selectedEvidenceId, errorCode: match?.[1] ?? "TOOL_OPERATION_FAILED", recipe: null };
   }
   if (toolName === "searchProducts" && toolOutput && typeof toolOutput === "object" && "output" in toolOutput && input && typeof input === "object") {
     const output = toolOutput.output;
     if (output && typeof output === "object" && "products" in output && "queries" in input) {
       const candidates = "traceCandidates" in output ? output.traceCandidates : output.products;
       const preselection = "preselection" in output ? output.preselection : undefined;
-      try { return { trace: catalogSearchTrace({ mcpTool: "silpo_find_products_batch", queries: input.queries, candidates, preselection }), selectedEvidenceId, errorCode: null }; }
-      catch { return { trace: null, selectedEvidenceId, errorCode: null }; }
+      try { return { trace: catalogSearchTrace({ mcpTool: "silpo_find_products_batch", queries: input.queries, candidates, preselection }), selectedEvidenceId, errorCode: null, recipe: null }; }
+      catch { return { trace: null, selectedEvidenceId, errorCode: null, recipe: null }; }
     }
   }
-  return { trace: null, selectedEvidenceId, errorCode: null };
+  if (toolName === "resolveRecipe" && toolOutput && typeof toolOutput === "object" && "output" in toolOutput) {
+    const recipe = HarnessTraceSchema.shape.recipe.unwrap().safeParse(toolOutput.output);
+    return { trace: null, selectedEvidenceId, errorCode: null, recipe: recipe.success ? recipe.data : null };
+  }
+  return { trace: null, selectedEvidenceId, errorCode: null, recipe: null };
 }
