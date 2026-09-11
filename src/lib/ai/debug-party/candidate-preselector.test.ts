@@ -60,4 +60,24 @@ describe("candidate preselector", () => {
 
     expect(result).toMatchObject({ status: "completed", verdicts: [{ evidenceId: "lactose-free", verdict: "match" }] });
   });
+
+  it("normalizes the legacy classification contract returned by the provider", async () => {
+    const result = await preselectCandidates(input, async () => ({
+      primaryProductType: "молоко",
+      requestedForm: "звичайне",
+      classifications: [
+        { evidenceId: "ordinary", class: "match", reason: "Питне молоко." },
+        { evidenceId: "cream", class: "exclude", reason: "Це вершки." },
+      ],
+    }));
+
+    expect(result).toEqual({
+      status: "completed",
+      normalizedIntent: { productKind: "молоко", requestedAttributes: ["звичайне"], exclusions: [] },
+      verdicts: [
+        { evidenceId: "ordinary", verdict: "match", reason: "Питне молоко." },
+        { evidenceId: "cream", verdict: "exclude", reason: "Це вершки." },
+      ],
+    });
+  });
 });

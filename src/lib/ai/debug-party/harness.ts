@@ -152,7 +152,7 @@ export async function runDebugHarness(input: unknown, dependencies: HarnessDepen
       agent.generate({
         prompt: JSON.stringify({ message: request.message, cart: compactCart(session.workspace), recipeRequirements: mergedRecipeRequirements(session.workspace.recipes) }),
         abortSignal: AbortSignal.timeout(limits.totalMs),
-        timeout: { totalMs: limits.totalMs, stepMs: limits.stepMs },
+        timeout: { totalMs: limits.totalMs, toolMs: limits.toolMs },
       }),
       limits.totalMs,
       () => new DebugHarnessRunError(activeToolName),

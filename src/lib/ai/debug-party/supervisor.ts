@@ -337,7 +337,7 @@ export async function runDebugPartySupervisor(input: unknown, dependencies: Supe
     });
     await withSignal(agent.generate({
       prompt: JSON.stringify({ mode: request.mode, ...(request.mode === "preprocess" ? { foodRequest: intent?.request } : compactState(state)), message }),
-      abortSignal: signal, timeout: { totalMs: limits.totalMs, stepMs: limits.stepMs },
+      abortSignal: signal, timeout: { totalMs: limits.totalMs, toolMs: limits.toolMs },
     }), signal);
     if (reply === undefined) reason ??= stepCount >= limits.maxSteps ? "step_limit" : "incomplete";
   } catch (error) {

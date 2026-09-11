@@ -46,6 +46,5 @@ export function resolveDebugPartyLimits(environment: DebugPartyEnvironment = pro
     maxMcpCalls: limit("AI_DEBUG_MAX_MCP_CALLS", 40),
     totalMs: limit("AI_DEBUG_TOTAL_TIMEOUT_MS", 180_000),
     toolMs,
-    stepMs: toolMs,
   };
 }

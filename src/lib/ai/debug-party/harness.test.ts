@@ -32,6 +32,29 @@ describe("AI Debug local harness", () => {
     })).rejects.toMatchObject({ code: "HARNESS_AGENT_FAILED" });
   });
 
+  it("allows a slow catalog tool to finish without cancelling the next agent step", async () => {
+    const model = new MockLanguageModelV4({ doGenerate: [response("searchProducts", { queries: ["вода"] }), response("complete", { reply: "Воду додано." })] });
+
+    const result = await runDebugHarness({ message: "додай воду", mcpAccessToken: "never-return" }, {
+      model,
+      environment: { AI_DEBUG_TOTAL_TIMEOUT_MS: "1000", AI_DEBUG_TOOL_TIMEOUT_MS: "10" },
+      candidatePreselector: async ({ candidates }) => ({
+        normalizedIntent: { productKind: "вода", requestedAttributes: [], exclusions: [] },
+        verdicts: candidates.map((candidate) => ({ evidenceId: candidate.evidenceId, verdict: "match", reason: "Питна вода." })),
+      }),
+      createGateway: () => ({
+        search: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+          return { groups: [{ query: "вода", products: [{ productId: "water", companyId: "company", branchId: "branch", name: "Вода негазована", unit: "1 л", unitPriceCents: 3000, discountCents: null, imageUrl: null, available: true }] }] };
+        },
+        inspect: async () => [], close: async () => undefined,
+      }),
+    } as never);
+
+    expect(result.reply).toBe("Воду додано.");
+    expect(result.trace.map((entry) => entry.toolName)).toEqual(["searchProducts", "complete"]);
+  });
+
   it("keeps the failed recipe-tool boundary when the agent cannot continue", async () => {
     const model = new MockLanguageModelV4({ doGenerate: [response("resolveRecipe", { query: "Карбонара" })] });
 

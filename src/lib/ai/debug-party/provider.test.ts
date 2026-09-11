@@ -26,7 +26,7 @@ it("sends normal tool-loop requests without forcing JSON response format", async
 });
 
 it("validates limits so invalid settings cannot disable bounds", () => {
-  expect(resolveDebugPartyLimits({})).toEqual({ maxSteps: 20, maxMcpCalls: 40, totalMs: 180000, toolMs: 15000, stepMs: 15000 });
+  expect(resolveDebugPartyLimits({})).toEqual({ maxSteps: 20, maxMcpCalls: 40, totalMs: 180000, toolMs: 15000 });
   for (const value of ["0", "-1", "NaN", "1.5"]) {
     expect(() => resolveDebugPartyLimits({ AI_DEBUG_MAX_STEPS: value })).toThrow();
   }

@@ -43,6 +43,20 @@ const CandidatePreselectorOutputSchema = z.strictObject({
   })).min(1).max(90),
 });
 
+const RequestedFormSchema = z.union([ShortText, z.array(ShortText).min(1).max(20)]).nullable().optional();
+const LegacyCandidatePreselectorOutputSchema = z.object({
+  primaryProductType: ShortText.optional(),
+  requestedPrimaryProductType: ShortText.optional(),
+  requestedForm: RequestedFormSchema,
+  classifications: z.array(z.strictObject({
+    evidenceId: Id,
+    class: CandidatePreselectorVerdictSchema,
+    reason: ShortText,
+  })).min(1).max(90),
+}).refine((value) => value.primaryProductType !== undefined || value.requestedPrimaryProductType !== undefined, {
+  message: "Legacy preselector output requires a primary product type.",
+});
+
 export type CandidatePreselectorInput = z.infer<typeof CandidatePreselectorInputSchema>;
 export type CandidatePreselector = (input: CandidatePreselectorInput) => Promise<unknown>;
 export type CandidatePreselectionStatus = "completed" | "unavailable" | "invalid";
@@ -64,10 +78,29 @@ export async function preselectCandidates(input: CandidatePreselectorInput, pres
   const safeInput = CandidatePreselectorInputSchema.parse(input);
   if (!preselector) return fallback(safeInput, "unavailable");
   try {
-    return verifyCoverage(safeInput, CandidatePreselectorOutputSchema.parse(await preselector(safeInput)));
+    return verifyCoverage(safeInput, normalizeOutput(await preselector(safeInput)));
   } catch {
     return fallback(safeInput, "invalid");
   }
+}
+
+function normalizeOutput(value: unknown): z.infer<typeof CandidatePreselectorOutputSchema> {
+  const current = CandidatePreselectorOutputSchema.safeParse(value);
+  if (current.success) return current.data;
+  const legacy = LegacyCandidatePreselectorOutputSchema.parse(value);
+  const requestedForm = legacy.requestedForm;
+  return {
+    normalizedIntent: {
+      productKind: legacy.primaryProductType ?? legacy.requestedPrimaryProductType!,
+      requestedAttributes: requestedForm === undefined || requestedForm === null ? [] : Array.isArray(requestedForm) ? requestedForm : [requestedForm],
+      exclusions: [],
+    },
+    verdicts: legacy.classifications.map((classification) => ({
+      evidenceId: classification.evidenceId,
+      verdict: classification.class,
+      reason: classification.reason,
+    })),
+  };
 }
 
 function verifyCoverage(input: CandidatePreselectorInput, output: z.infer<typeof CandidatePreselectorOutputSchema>): CandidatePreselection {
