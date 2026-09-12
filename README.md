@@ -14,7 +14,11 @@ For a complete localhost setup and multi-account testing walkthrough, see
    `supabase/migrations/202609090001_party_prototype.sql`, then
    `supabase/migrations/202609090002_silpo_cart_sync.sql`, then
    `supabase/migrations/202609090003_fix_party_code_generation.sql`, then
-   `supabase/migrations/202609100001_ai_meal_proposals.sql`.
+   `supabase/migrations/202609100001_ai_meal_proposals.sql`, then
+   `supabase/migrations/20260912120000_remove_debug_party.sql`, then
+   `supabase/migrations/20260912121000_party_agent_workspace.sql`. The cleanup
+   migration is also safe for existing databases that applied the temporary
+   debug migrations.
 2. In Supabase Authentication, enable Google and configure the Google client ID and
    secret. Add `http://localhost:3000/auth/callback` (and the production equivalent)
    to the Supabase redirect allow-list. Google's authorized redirect URI is the

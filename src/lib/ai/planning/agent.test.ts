@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { planEvent } from "./agent";
 import { PlanningProviderError, PlanningSafetyError } from "./errors";
-import type { PlanningDebugEvent } from "./debug-stream";
+import type { PlanningTraceEvent } from "./trace-stream";
 import { createConfiguredPlanningProvider } from "./provider";
 import type { EventPlan, GroupPlanningInput } from "./schemas";
 
@@ -163,7 +163,7 @@ describe("planEvent", () => {
   });
 
   it("emits inspectable stages in execution order", async () => {
-    const events: PlanningDebugEvent[] = [];
+    const events: PlanningTraceEvent[] = [];
 
     await planEvent(validInput, {
       loadParticipantContext: async () => ({
@@ -175,7 +175,7 @@ describe("planEvent", () => {
         },
       }),
       generatePlan: async () => safePlan,
-      onDebugEvent: (event) => events.push(event),
+      onTraceEvent: (event) => events.push(event),
     });
 
     expect(events.map(({ stage, status }) => `${stage}:${status}`)).toEqual([
@@ -215,7 +215,7 @@ describe("planEvent", () => {
   });
 
   it("emits the original provider failure at the model stage", async () => {
-    const events: PlanningDebugEvent[] = [];
+    const events: PlanningTraceEvent[] = [];
 
     const request = expect(
       planEvent(validInput, {
@@ -223,7 +223,7 @@ describe("planEvent", () => {
         generatePlan: async () => {
           throw new Error("upstream status 429");
         },
-        onDebugEvent: (event) => events.push(event),
+        onTraceEvent: (event) => events.push(event),
       }),
     ).rejects;
 

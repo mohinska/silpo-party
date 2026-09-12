@@ -85,6 +85,7 @@ AI_API_KEY=...
 AI_BASE_URL=https://api.deepseek.com
 AI_NORMALIZER_MODEL=deepseek-v4-flash
 AI_PLANNER_MODEL=deepseek-v4-flash
+AI_SUPERVISOR_MODEL=deepseek-v4-flash
 ```
 
 DeepSeek requests use Chat Completions JSON-object mode
@@ -117,12 +118,34 @@ and counts of restrictions, favorites, and ambiguous fragments. Unavailable
 traces may contain a concise operational reason. They contain no raw payload,
 prompt, credential, personal contact value, or food-content excerpt.
 
-## Debug route
+## Product party integration
 
-The temporary authenticated `/ai-debug` server action continues to use the real
-user's MCP session, but passes its result into the same preprocessing pipeline.
-Its planning trace is metadata-only. Frontend files are intentionally unchanged
-by this backend architecture revision.
+The authenticated `/party/[code]` flow uses the same validated planning pipeline
+with the Host's server-side MCP session. The product UI exposes only safe status
+and result information; credentials and raw upstream payloads never reach the
+browser.
+
+The party orchestration layer adds typed specialist contracts in
+`src/lib/ai/agents`:
+
+```text
+chat message
+→ Intent Agent
+→ Main Supervisor
+→ Context Agent / Recipe Agent / Ingredient Agent
+→ Silpo Product Agent
+→ deterministic Basket Agent
+→ deterministic Constraint Reviewer
+→ proposal
+```
+
+The Intent Agent stores cumulative intent deltas rather than replacing the
+participant's request with the latest sentence. The Main Supervisor may choose
+only validated actions and uses a separate `AI_SUPERVISOR_MODEL`. Product
+resolution sends alternative queries through the Host's store context, ranks
+verified candidates instead of accepting the first MCP result, and never has
+cart mutation capabilities. Basket writes remain available only in the Host
+confirmation lifecycle.
 
 ## Verification
 

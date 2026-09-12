@@ -4,6 +4,7 @@ import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { readToolData, type SilpoTool, withSilpoMcp } from "@/lib/silpo/mcp";
 import type { CatalogProduct, MergedIngredient, ProductLine, Unit } from "@/lib/ai/planning/proposal-schemas";
+import { productSearchQueries, rankCatalogCandidates } from "@/lib/ai/planning/product-agent";
 
 type JsonSchema = {
   type?: string;
@@ -501,15 +502,31 @@ function safetyFromProduct(value: unknown, requirement: MergedIngredient) {
 export async function resolveSilpoProposalProducts(hostId: string, requirements: MergedIngredient[]) {
   return withSilpoMcp(hostId, async (client, tools) => {
     const context = await getCartContext(client, tools);
-    const queries = requirements.map((item) => ({ name: `${item.name}${item.variant === "standard" ? "" : ` ${item.variant}`}`, quantity: item.quantity }));
+    const queries = requirements.flatMap((item) => productSearchQueries({
+      name: item.name,
+      variant: item.variant === "standard" ? undefined : item.variant,
+    }).map((name) => ({ name, quantity: item.quantity })));
     const data = await callTool(client, tools, "silpo_find_products_batch", "find", context, { queries });
     const grouped = queryGroups(data, context);
-    const all = productCandidates(data, context);
+    const flatCandidates = requirements.length === 1 ? productCandidates(data, context) : [];
     const detailTool = [...tools.keys()].find((name) => /silpo.*product.*(detail|by.?id)/i.test(name));
     const entries: Array<readonly [string, CatalogProduct[]]> = [];
-    for (const [index, requirement] of requirements.entries()) {
-      const candidates = (grouped.get(searchKey(queries[index].name)) ?? all)
-        .slice(0, 8);
+    for (const requirement of requirements) {
+      const candidateMap = new Map<string, ResolvedProduct>();
+      for (const query of productSearchQueries({
+        name: requirement.name,
+        variant: requirement.variant === "standard" ? undefined : requirement.variant,
+      })) {
+        for (const candidate of grouped.get(searchKey(query)) ?? []) {
+          candidateMap.set(`${candidate.productId}|${candidate.companyId ?? ""}|${candidate.branchId ?? ""}`, candidate);
+        }
+      }
+      if (!candidateMap.size && requirements.length === 1) {
+        for (const candidate of flatCandidates) {
+          candidateMap.set(`${candidate.productId}|${candidate.companyId ?? ""}|${candidate.branchId ?? ""}`, candidate);
+        }
+      }
+      const candidates = [...candidateMap.values()].slice(0, 20);
       const sanitized: CatalogProduct[] = [];
       for (const candidate of candidates) {
         let evidence = candidate.evidence;
@@ -524,7 +541,7 @@ export async function resolveSilpoProposalProducts(hostId: string, requirements:
         if (!candidate.companyId || !candidate.branchId || candidate.priceCents === undefined || !packaging || available === undefined) continue;
         sanitized.push({ productId: candidate.productId, companyId: candidate.companyId, branchId: candidate.branchId, name: candidate.name, packageQuantity: packaging.quantity, packageUnit: packaging.unit, priceCents: candidate.priceCents, available, dietarySafety: safety, readyMeal, productUrl: candidate.slug ? `https://silpo.ua/product/${candidate.slug}` : undefined, imageUrl: candidate.imageUrl });
       }
-      entries.push([requirement.key, sanitized] as const);
+      entries.push([requirement.key, rankCatalogCandidates({ name: requirement.name, variant: requirement.variant === "standard" ? undefined : requirement.variant }, sanitized)] as const);
     }
     return new Map(entries);
   });

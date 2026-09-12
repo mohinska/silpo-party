@@ -21,6 +21,7 @@ describe("resolvePlanningProviderConfig", () => {
       baseUrl: validEnvironment.AI_BASE_URL,
       normalizerModel: "deepseek-v4-flash",
       plannerModel: "deepseek-v4-flash",
+      supervisorModel: "deepseek-v4-flash",
     });
   });
 
@@ -46,6 +47,7 @@ describe("createConfiguredPlanningProvider", () => {
       ...validEnvironment,
       AI_NORMALIZER_MODEL: "deepseek-normalizer-test",
       AI_PLANNER_MODEL: "deepseek-planner-test",
+      AI_SUPERVISOR_MODEL: "deepseek-supervisor-test",
     });
 
     expect(provider.participantNormalizerModel().modelId).toBe(
@@ -54,5 +56,6 @@ describe("createConfiguredPlanningProvider", () => {
     expect(provider.groupPlannerModel().modelId).toBe(
       "deepseek-planner-test",
     );
+    expect(provider.supervisorModel().modelId).toBe("deepseek-supervisor-test");
   });
 });

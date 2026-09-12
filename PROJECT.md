@@ -1,9 +1,8 @@
 # Silpo Family
 
 Last updated: 2026-09-10
-Status: No-AI multi-user party prototype implemented with Google/Supabase auth and
-real Host-cart synchronization through Silpo MCP. An isolated agent-first,
-multi-user debug-party flow for `/ai-debug` is approved for implementation.
+Status: Canonical multi-user party flow implemented with Google/Supabase auth,
+agent-driven planning, and real Host-cart synchronization through Silpo MCP.
 
 ## Source of truth
 
@@ -280,47 +279,18 @@ Optional after the core flow is solid: Mine / Not mine → split bill.
 
 This sequence and the primacy of the shared plan/basket workspace are confirmed product direction.
 
-## Approved agent-first `/ai-debug` flow
+## Current agent party flow
 
-`/ai-debug` will become an isolated persistent debug-party experience without
-changing the existing `/party` flow. A real authenticated Host creates a party
-with an optional total budget and receives a stable, non-expiring code and invite
-link. Real authenticated participants join with separate accounts, connect their
-own Silpo MCP sessions, and submit one short dish, food wish, or recipe URL.
+The canonical `/party/[code]` workspace is the only party surface. After joining,
+participants use two tabs: shared chat and the read-only agent-built basket. The
+agent interprets natural-language intents, combines participant context, resolves
+recipes, searches verified Silpo products, and updates the shared basket. Members
+do not edit product lines directly; changes go through chat. The Host confirms the
+final basket before the deterministic Silpo synchronization step.
 
-Continue invokes the debug-party supervisor in participant-scoped mode, which
-must dispatch a personal subagent through that participant's own Silpo MCP
-session. It prepares a compact validated context containing relevant preferences,
-allergies/forbidden products, dietary restrictions, food preferences, up to the
-five most recent purchases/orders when the MCP server exposes that capability,
-and the submitted intent. Raw MCP responses and credentials never reach the main
-agent or persistent debug log.
-
-The main DeepSeek supervisor orchestrates multi-round tool and subagent calls,
-reasons globally across the party, and maintains an internal local cart. It must
-prefer suitable previously purchased products, then discounted prior products,
-then verified reasonable/popular Silpo search results. Silpo MCP results are
-authoritative for product identity, availability, promotions, and prices. The
-model may use all relevant read-only capabilities advertised by the connected
-MCP server, but may not invent results. MCP cart-write capabilities remain outside
-the agent and are used only by deterministic Send to Silpo.
-
-All participants may issue broad natural-language cart instructions in the
-shared chat. There is no hardcoded phrase/intent pipeline. The model selects from
-a backend-owned registry of strict Zod tools; the backend validates membership,
-party state, product evidence, permissions, and cart revision before applying a
-typed command. Arbitrary model-written SQL, HTTP, code, or UI mutations are not
-accepted.
-
-Finalize creates a frozen read-only local snapshot. Send to Silpo is a separate,
-deterministic, Host-only validation and synchronization pipeline using the Host's
-Silpo MCP session; no LLM participates in the final write. Detailed approved
-architecture is recorded in
-`docs/superpowers/specs/2026-09-10-agent-first-debug-party-design.md`.
-Detailed screen layouts, readiness mechanics, ownership-conflict handling and split
-formulas have not been specified. The MVP delivery menu/checkout presentation is a
-mocked animation. Real Silpo catalog/cart execution and checkout-link handoff are now
-implemented through MCP; placing the order, payment and delivery tracking remain deferred.
+Agent outputs are validated and bounded. Credentials and raw MCP payloads never
+reach the browser or persistent product records. Diagnostic routes, scripts, and
+harnesses are not part of the canonical party product surface.
 
 ## Design proposals — not approved
 
@@ -522,14 +492,9 @@ confirmed sections prevail over superseded interpretations.
   absence of restrictions and does not block planning. Explicit ambiguous restriction
   fragments still require normalization or clarification. Food intent `none` means
   “I don't care” and allows the planner to choose a suitable dish.
-- 2026-09-10: Approved an isolated agent-first `/ai-debug` party. It uses real
-  accounts, stable invitation links, each participant's real Silpo MCP session,
-  mandatory compact personal-subagent preprocessing, a DeepSeek MCP-native
-  supervisor with validated multi-round tools, a versioned local cart, shared
-  natural-language chat, a sanitized debug log, immutable finalization, and a
-  deterministic Host-only Send to Silpo step. The Host budget is optional in this
-  debug flow. Mock data is limited to seed intents/UI fixtures and cannot replace
-  MCP product, price, promotion, availability, or personal-context facts.
+- 2026-09-12: Consolidated the temporary agent-party work into the canonical
+  `/party/[code]` flow. The product now exposes only Chat and Basket tabs; the
+  agent owns basket changes and the Host confirms the final Silpo synchronization.
 
 ## Contradictions resolved and ambiguity retained
 

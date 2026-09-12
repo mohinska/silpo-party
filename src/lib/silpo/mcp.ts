@@ -27,10 +27,9 @@ export type SilpoMcpSession = {
   close(): Promise<void>;
 };
 
-export async function openSilpoMcpSession(userId: string): Promise<SilpoMcpSession> {
-  const accessToken = await getAccessToken(userId);
-  if (!accessToken) throw new Error("Організатор має підключити акаунт «Сільпо» у профілі.");
-
+/** Opens an MCP session from an already-authorized server-side token. The token is never returned or stored here. */
+export async function openSilpoMcpSessionWithAccessToken(accessToken: string): Promise<SilpoMcpSession> {
+  if (!accessToken.trim()) throw new Error("Silpo MCP access token is required.");
   const transport = new StreamableHTTPClientTransport(new URL(SILPO_MCP_URL), {
     requestInit: { headers: { Authorization: `Bearer ${accessToken}` } },
   });
@@ -43,6 +42,12 @@ export async function openSilpoMcpSession(userId: string): Promise<SilpoMcpSessi
     await client.close().catch(() => undefined);
     throw error;
   }
+}
+
+export async function openSilpoMcpSession(userId: string): Promise<SilpoMcpSession> {
+  const accessToken = await getAccessToken(userId);
+  if (!accessToken) throw new Error("Організатор має підключити акаунт «Сільпо» у профілі.");
+  return openSilpoMcpSessionWithAccessToken(accessToken);
 }
 
 export async function withSilpoMcp<T>(
