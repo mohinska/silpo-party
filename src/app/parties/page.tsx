@@ -1,14 +1,17 @@
 import Link from "next/link";
 import { PendingButton } from "@/components/pending-button";
+import { AppHeader } from "@/components/app-header";
+import { getCurrentUser } from "@/lib/auth";
 import { formatMoney, listMyParties } from "@/lib/parties";
 import { createParty, joinByCode } from "./actions";
 
 export default async function PartiesPage() {
-  const parties = await listMyParties();
+  const [parties, user] = await Promise.all([listMyParties(), getCurrentUser()]);
+  if (!user) return null;
   return (
     <main className="page-shell align-start">
       <div className="workspace narrow-workspace">
-        <nav className="topbar"><Link href="/">Сільпо Party</Link><Link href="/profile">Профіль</Link></nav>
+        <AppHeader user={user} backHref="/" />
         <header className="section-heading"><p className="eyebrow">Події</p><h1>Спільні покупки починаються тут</h1><p className="muted">Створіть подію або приєднайтеся за посиланням чи кодом.</p></header>
         <div className="two-column">
           <form action={createParty} className="panel stack">

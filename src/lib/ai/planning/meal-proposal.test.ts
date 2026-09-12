@@ -87,6 +87,16 @@ describe("catalog selection", () => {
     expect(result.alternatives[0]).toMatchObject({ kind: "increase_budget", amountCents: 1000 });
   });
 
+  it("does not apply a hard budget constraint when no budget is set", () => {
+    const result = chooseProducts([
+      { key: "milk|regular|ml", name: "Milk", canonicalName: "milk", variant: "regular", quantity: 900, unit: "ml", optional: false, dishIds: ["a"] },
+    ], new Map([["milk|regular|ml", products]]), null);
+
+    expect(result.totalCents).toBe(6000);
+    expect(result.budgetStatus).toBe("within");
+    expect(result.alternatives).toEqual([]);
+  });
+
   it("requires verified safety for ready meals", () => {
     const ready: CatalogProduct = { ...products[0], productId: "ready", name: "Ready pasta", readyMeal: true, dietarySafety: "uncertain" };
     const result = chooseProducts([{ key: "ready", name: "Ready pasta", canonicalName: "ready pasta", variant: "vegan", quantity: 1, unit: "piece", optional: false, dishIds: ["a"], readyMeal: true }], new Map([["ready", [ready]]]), 10000);

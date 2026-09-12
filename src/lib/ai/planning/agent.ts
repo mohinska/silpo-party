@@ -3,9 +3,9 @@ import type {
   ParticipantContextTraceEntry,
 } from "./context";
 import {
-  createPlanningDebugEmitter,
-  type PlanningDebugEventSink,
-} from "./debug-stream";
+  createPlanningTraceEmitter,
+  type PlanningTraceEventSink,
+} from "./trace-stream";
 import {
   isPlanningGenerationError,
   PlanningProviderError,
@@ -46,7 +46,7 @@ export type PlanEventOptions = {
   normalizeParticipantContext?: ParticipantNormalizationAdapter;
   generatePlan?: PlanGenerationAdapter;
   modelProvider?: PlanningModelProvider;
-  onDebugEvent?: PlanningDebugEventSink;
+  onTraceEvent?: PlanningTraceEventSink;
 };
 
 export type PlanningResult = {
@@ -126,14 +126,14 @@ export async function planEvent(
   rawInput: unknown,
   options: PlanEventOptions = {},
 ): Promise<PlanningResult> {
-  const debug = createPlanningDebugEmitter(options.onDebugEvent);
-  debug.started("input", { raw: rawInput });
+  const events = createPlanningTraceEmitter(options.onTraceEvent);
+  events.started("input", { raw: rawInput });
   let input: EventPlanningInput;
   try {
     input = EventPlanningInputSchema.parse(rawInput);
-    debug.completed("input", { input });
+    events.completed("input", { input });
   } catch (error) {
-    debug.failed("input", error);
+    events.failed("input", error);
     throw error;
   }
   let configuredProvider = options.modelProvider;
@@ -155,7 +155,7 @@ export async function planEvent(
       const supplied = suppliedContextAsRaw(participant);
       let loaded: Awaited<ReturnType<ParticipantContextLoader>>;
       let contextFailed = false;
-      debug.started(
+      events.started(
         "context",
         { source: supplied ? "supplied" : "silpo-mcp" },
         participant.id,
@@ -167,7 +167,7 @@ export async function planEvent(
           loaded = await loadParticipantContext(participant.id);
         } catch (error) {
           contextFailed = true;
-          debug.failed("context", error, participant.id);
+          events.failed("context", error, participant.id);
           loaded = {
             status: "unavailable",
             reason: "Silpo context collection failed.",
@@ -175,7 +175,7 @@ export async function planEvent(
         }
       }
       if (!contextFailed) {
-        debug.completed(
+        events.completed(
           "context",
           loaded.status === "available"
             ? { status: loaded.status, raw: loaded.data }
@@ -183,7 +183,7 @@ export async function planEvent(
           participant.id,
         );
       }
-      debug.started("signals", undefined, participant.id);
+      events.started("signals", undefined, participant.id);
       const signals =
         loaded.status === "available"
           ? extractParticipantFoodSignals(participant.id, loaded.data)
@@ -195,14 +195,14 @@ export async function planEvent(
               evidence: [],
               completeness: "unavailable",
             });
-      debug.completed("signals", { signals }, participant.id);
+      events.completed("signals", { signals }, participant.id);
       const normalizeAmbiguous =
         options.normalizeParticipantContext ??
         (signals.ambiguousFragments.length > 0
           ? createDefaultNormalizer(getProvider())
           : undefined);
       let foodContext: UserFoodContext;
-      debug.started(
+      events.started(
         "normalization",
         { mode: normalizeAmbiguous ? "model-assisted" : "deterministic" },
         participant.id,
@@ -213,9 +213,9 @@ export async function planEvent(
           signals,
           normalizeAmbiguous,
         });
-        debug.completed("normalization", { foodContext }, participant.id);
+        events.completed("normalization", { foodContext }, participant.id);
       } catch (error) {
-        debug.failed("normalization", error, participant.id);
+        events.failed("normalization", error, participant.id);
         const fallback = await normalizeParticipantFoodContext({
           participant,
           signals: {
@@ -257,7 +257,7 @@ export async function planEvent(
     },
   );
 
-  debug.started("prompt");
+  events.started("prompt");
   const groupInput = GroupPlanningInputSchema.parse({
     event: input.event,
     host: input.host,
@@ -274,24 +274,24 @@ export async function planEvent(
   });
   const system = PLANNING_SYSTEM_PROMPT;
   const prompt = buildPlanningPrompt(groupInput);
-  debug.completed("prompt", { input: groupInput, system, prompt });
+  events.completed("prompt", { input: groupInput, system, prompt });
   const generatePlan =
     options.generatePlan ?? createDefaultPlanner(getProvider());
   let rawPlan: unknown;
-  debug.started("model");
+  events.started("model");
   try {
     rawPlan = await generatePlan({
       input: groupInput,
       system,
       prompt,
     });
-    debug.completed("model", { rawOutput: rawPlan });
+    events.completed("model", { rawOutput: rawPlan });
   } catch (error) {
-    debug.failed("model", error);
+    events.failed("model", error);
     if (isPlanningGenerationError(error)) throw error;
     throw new PlanningProviderError(error);
   }
-  debug.started("contract");
+  events.started("contract");
   let plan: EventPlan;
   try {
     const validation = EventPlanSchema.safeParse(rawPlan);
@@ -299,17 +299,17 @@ export async function planEvent(
       throw new PlanningSchemaValidationError(validation.error);
     }
     plan = validation.data;
-    debug.completed("contract", { plan });
+    events.completed("contract", { plan });
   } catch (error) {
-    debug.failed("contract", error);
+    events.failed("contract", error);
     throw error;
   }
-  debug.started("safety");
+  events.started("safety");
   try {
     assertEventPlanSafety(groupInput, plan);
-    debug.completed("safety", { checks: plan.hardConstraintChecks });
+    events.completed("safety", { checks: plan.hardConstraintChecks });
   } catch (error) {
-    debug.failed("safety", error);
+    events.failed("safety", error);
     throw error;
   }
 

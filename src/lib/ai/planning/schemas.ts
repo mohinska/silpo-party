@@ -114,7 +114,8 @@ export const EventPlanningInputSchema = z
         amount: z.number().finite().positive(),
         currency: z.string().regex(/^[A-Z]{3}$/),
       })
-      .strict(),
+      .strict()
+      .nullable(),
     participants: z.array(EventParticipantSchema).min(1).max(10),
   })
   .strict()

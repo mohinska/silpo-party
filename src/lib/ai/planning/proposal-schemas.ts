@@ -48,7 +48,8 @@ export const ProductLineSchema = z.object({
 export const MealProposalSchema = z.object({
   id: z.string().min(1), partyId: z.string().min(1),
   status: z.enum(["pending", "rejected", "applying", "applied", "failed"]),
-  currency: z.literal("UAH"), budgetCents: z.number().int().nonnegative(),
+  inputFingerprint: z.string().min(1).optional(),
+  currency: z.literal("UAH"), budgetCents: z.number().int().nonnegative().nullable(),
   dishes: z.array(z.object({ id: z.string(), name: z.string(), eaterParticipantIds: z.array(z.string()), servings: z.number().int().positive(), recipeId: z.string().optional(), readyMeal: z.boolean().default(false) }).strict()),
   recipes: z.array(RecipeSchema), mergedIngredients: z.array(MergedIngredientSchema), productLines: z.array(ProductLineSchema),
   estimatedTotalCents: z.number().int().nonnegative(), budgetStatus: z.enum(["within", "over", "unresolved"]),

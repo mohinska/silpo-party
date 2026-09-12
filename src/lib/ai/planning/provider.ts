@@ -25,11 +25,13 @@ export type PlanningProviderConfig = {
   baseUrl: string;
   normalizerModel: string;
   plannerModel: string;
+  supervisorModel: string;
 };
 
 export type PlanningModelProvider = {
   participantNormalizerModel(): PlanningJsonModel;
   groupPlannerModel(): PlanningJsonModel;
+  supervisorModel(): PlanningJsonModel;
 };
 
 function createJsonTextModel(
@@ -74,6 +76,8 @@ export function resolvePlanningProviderConfig(
       environment.AI_NORMALIZER_MODEL?.trim() || "deepseek-v4-flash",
     plannerModel:
       environment.AI_PLANNER_MODEL?.trim() || "deepseek-v4-flash",
+    supervisorModel:
+      environment.AI_SUPERVISOR_MODEL?.trim() || "deepseek-v4-flash",
   };
 }
 
@@ -96,5 +100,6 @@ export function createConfiguredPlanningProvider(
     participantNormalizerModel: () =>
       createJsonTextModel(deepseek(config.normalizerModel)),
     groupPlannerModel: () => createJsonTextModel(deepseek(config.plannerModel)),
+    supervisorModel: () => createJsonTextModel(deepseek(config.supervisorModel)),
   };
 }

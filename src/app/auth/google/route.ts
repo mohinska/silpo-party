@@ -4,10 +4,10 @@ import { createClient } from "@/lib/supabase/server";
 export async function GET(request: Request) {
   const requestUrl = new URL(request.url);
   const origin = process.env.NEXT_PUBLIC_APP_URL?.replace(/\/$/, "") ?? requestUrl.origin;
-  const requestedNext = requestUrl.searchParams.get("next") ?? "/profile";
+  const requestedNext = requestUrl.searchParams.get("next") ?? "/parties";
   const next = requestedNext.startsWith("/") && !requestedNext.startsWith("//")
     ? requestedNext
-    : "/profile";
+    : "/parties";
   const supabase = await createClient();
   const { data, error } = await supabase.auth.signInWithOAuth({
     provider: "google",

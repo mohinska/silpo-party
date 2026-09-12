@@ -39,6 +39,10 @@ describe("EventPlanningInputSchema", () => {
     expect(EventPlanningInputSchema.parse(validInput)).toEqual(validInput);
   });
 
+  it("accepts an event without a shared budget", () => {
+    expect(EventPlanningInputSchema.parse({ ...validInput, budget: null }).budget).toBeNull();
+  });
+
   it("rejects duplicate participant IDs", () => {
     const result = EventPlanningInputSchema.safeParse({
       ...validInput,

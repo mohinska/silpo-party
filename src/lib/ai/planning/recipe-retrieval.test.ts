@@ -127,7 +127,7 @@ describe("recipe provenance", () => {
     });
     const recipe = await retrieveRecipe({ dishName: "паста" }, fetcher as typeof fetch);
     expect(recipe.title).toBe("Паста болоньєзе");
-    expect(fetched[1]).toBe("https://silpo.ua/recipes/pasta");
+    expect(fetched).toContain("https://silpo.ua/recipes/pasta");
   });
 
   it("tries the next relevant source card when the first one has no complete recipe", async () => {
@@ -142,5 +142,38 @@ describe("recipe provenance", () => {
     expect(fetcher).toHaveBeenCalledWith("https://silpo.ua/recipes/second", expect.objectContaining({
       cache: "no-store", headers: expect.objectContaining({ "Accept-Language": "uk-UA,uk;q=0.9,en;q=0.8" }),
     }));
+  });
+
+  it("uses the public Silpo recipe catalog instead of the unrelated landing-page cards", async () => {
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === "https://sf-ecom-api.silpo.ua/v1/recipes?limit=50&offset=0") {
+        return Response.json({
+          limit: 50, offset: 0, total: 3,
+          items: [
+            { slug: "pasta-bolonieze", title: "Паста болоньєзе" },
+            { slug: "pasta-putaneska", title: "Паста путанеска" },
+            { slug: "karbonara", title: "Карбонара" },
+          ],
+        });
+      }
+      if (url === "https://sf-ecom-api.silpo.ua/v1/recipe/karbonara") {
+        return Response.json({
+          id: "recipe", slug: "karbonara", title: "Карбонара", amount: 2,
+          ingredients: [
+            { name: "Спагеті", measure: { quantity: 200, unit: "г" } },
+            { name: "Сіль", measure: { quantity: 0, unit: "за смаком" } },
+          ],
+        });
+      }
+      throw new Error(`Unexpected recipe URL: ${url}`);
+    });
+
+    await expect(retrieveRecipe({ dishName: "паста карбонара" }, fetcher as typeof fetch)).resolves.toMatchObject({
+      title: "Карбонара",
+      baseServings: 2,
+      source: { url: "https://silpo.ua/recipes/karbonara" },
+      ingredients: [{ name: "Спагеті", quantity: 200, unit: "g" }],
+    });
   });
 });

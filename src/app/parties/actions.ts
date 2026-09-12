@@ -12,7 +12,12 @@ import {
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { applyMealProposal, createMealProposal, rejectMealProposal } from "@/lib/ai/planning/proposals";
+import { applyIntentDelta, parseIntentDelta } from "@/lib/ai/agents/intent";
+import { createAgentRun, linkAgentRunToMessage } from "@/lib/ai/agents/agent-runs";
+import { dispatchPartyAgentRun } from "@/lib/ai/agents/party-runner";
+import { createConfiguredPlanningProvider } from "@/lib/ai/planning/provider";
 import { getPartyWorkspace } from "@/lib/parties";
+import { parseFoodIntentInput } from "@/lib/food-intent-input";
 
 function clean(value: FormDataEntryValue | null, max: number) {
   return String(value ?? "").trim().slice(0, max);
@@ -71,10 +76,11 @@ export async function joinParty(code: string) {
 export async function saveBudget(code: string, formData: FormData) {
   const { user, supabase, party } = await partyForMember(code);
   if (party.host_id !== user.id) throw new Error("Лише Організатор може змінювати бюджет.");
-  const budget = Number(clean(formData.get("budget"), 20).replace(",", "."));
-  if (!Number.isFinite(budget) || budget < 0 || budget > 10_000_000) throw new Error("Вкажіть коректний бюджет.");
+  const rawBudget = clean(formData.get("budget"), 20).replace(",", ".");
+  const budget = rawBudget ? Number(rawBudget) : null;
+  if (budget !== null && (!Number.isFinite(budget) || budget < 0 || budget > 10_000_000)) throw new Error("Вкажіть коректний бюджет.");
   const { error } = await supabase.from("parties").update({
-    budget_cents: Math.round(budget * 100),
+    budget_cents: budget === null ? null : Math.round(budget * 100),
     updated_at: new Date().toISOString(),
   }).eq("id", party.id);
   if (error) throw error;
@@ -84,17 +90,76 @@ export async function saveBudget(code: string, formData: FormData) {
 export async function saveIntent(code: string, formData: FormData) {
   const { user, supabase, party } = await partyForMember(code);
   if (party.status !== "collecting") throw new Error("Подію вже фіналізовано.");
+  const input = clean(formData.get("intent"), 1_200);
+  const parsed = parseFoodIntentInput(input);
   const indifferent = formData.get("indifferent") === "on";
   const { error } = await supabase.from("food_intents").upsert({
     party_id: party.id,
     user_id: user.id,
-    dish_name: indifferent ? "" : clean(formData.get("dish_name"), 120),
-    description: indifferent ? "" : clean(formData.get("description"), 1000),
-    content_url: indifferent ? "" : clean(formData.get("content_url"), 500),
+    dish_name: indifferent ? "" : parsed.dishName,
+    description: indifferent ? "" : parsed.description,
+    content_url: indifferent ? "" : parsed.contentUrl,
     indifferent,
     updated_at: new Date().toISOString(),
   });
   if (error) throw error;
+  const { data: userMessage, error: messageError } = await supabase.from("party_chat_messages").insert({
+    party_id: party.id,
+    participant_id: user.id,
+    role: "user",
+    content: indifferent ? "Мені байдуже — врахуйте мої обмеження." : input,
+    status: "completed",
+  }).select("id").single();
+  if (messageError || !userMessage) throw messageError ?? new Error("Не вдалося зберегти повідомлення.");
+  const run = await createAgentRun({ partyId: party.id, inputMessageId: userMessage.id });
+  await linkAgentRunToMessage(run.id, userMessage.id);
+  await dispatchPartyAgentRun(run.id);
+  revalidatePath(`/party/${party.code}`);
+}
+
+export async function sendPartyAgentMessage(code: string, formData: FormData) {
+  const { user, supabase, party } = await partyForMember(code);
+  if (party.status !== "collecting") throw new Error("Подію вже фіналізовано.");
+  const content = clean(formData.get("content"), 2_000);
+  if (!content) throw new Error("Напишіть, що потрібно додати або змінити.");
+
+  const workspaceBeforeMessage = await getPartyWorkspace(party.code);
+  const previous = workspaceBeforeMessage.intents.find((intent) => intent.user_id === user.id);
+  let provider: ReturnType<typeof createConfiguredPlanningProvider> | undefined;
+  try { provider = createConfiguredPlanningProvider(); } catch { /* Structured fallback keeps chat usable without AI configuration. */ }
+  const delta = await parseIntentDelta(content, {
+    generate: provider?.participantNormalizerModel().generateJsonText ?? (async () => "{}"),
+  });
+  const nextIntent = applyIntentDelta(delta, {
+    dishName: previous?.dish_name ?? "",
+    description: previous?.description ?? "",
+    contentUrl: previous?.content_url ?? "",
+    indifferent: previous?.indifferent ?? false,
+  });
+
+  const { data: userMessage, error: messageError } = await supabase.from("party_chat_messages").insert({
+    party_id: party.id,
+    participant_id: user.id,
+    role: "user",
+    content,
+    status: "completed",
+  }).select("id").single();
+  if (messageError || !userMessage) throw messageError ?? new Error("Не вдалося зберегти повідомлення.");
+
+  const { error } = await supabase.from("food_intents").upsert({
+    party_id: party.id,
+    user_id: user.id,
+    dish_name: nextIntent.dishName,
+    description: nextIntent.description || content,
+    content_url: nextIntent.contentUrl,
+    indifferent: nextIntent.indifferent,
+    updated_at: new Date().toISOString(),
+  });
+  if (error) throw error;
+
+  const run = await createAgentRun({ partyId: party.id, inputMessageId: userMessage.id });
+  await linkAgentRunToMessage(run.id, userMessage.id);
+  await dispatchPartyAgentRun(run.id);
   revalidatePath(`/party/${party.code}`);
 }
 
@@ -239,8 +304,6 @@ export async function finalizeParty(code: string, formData: FormData) {
   const shareError = shareResults.find((result) => result.error)?.error;
   if (shareError) throw shareError;
 
-  const synchronized = await syncPartyBasketToSilpo(party.id, party.host_id);
-  if (!synchronized.ok) throw new Error(synchronized.error);
   const { error } = await supabase.from("parties").update({
     status: "finalized",
     finalized_at: new Date().toISOString(),
@@ -266,14 +329,23 @@ export async function runAiMealPlanner(code: string) {
   const workspace = await getPartyWorkspace(code);
   if (workspace.party.host_id !== workspace.user.id) throw new Error("Only the Host may run AI meal planning.");
   if (workspace.party.status !== "collecting") throw new Error("Reopen the party before planning.");
-  if (!workspace.party.budget_cents) throw new Error("Set the shared budget first.");
   if (workspace.members.some((member) => !workspace.intents.some((intent) => intent.user_id === member.user_id))) throw new Error("Every participant must submit a dish or explicitly choose ‘I don’t care’.");
   await createMealProposal(workspace);
   revalidatePath(`/party/${workspace.party.code}`);
 }
 
+export async function sendPartyToSilpo(code: string) {
+  const { user, party } = await partyForMember(code);
+  if (party.host_id !== user.id) throw new Error("Лише Організатор може відправити кошик до «Сільпо».");
+  if (party.status !== "finalized") throw new Error("Спочатку фіналізуйте кошик.");
+  const synchronized = await syncPartyBasketToSilpo(party.id, party.host_id);
+  if (!synchronized.ok) throw new Error(synchronized.error);
+  revalidatePath(`/party/${party.code}`);
+}
+
 export async function confirmAiProposal(code: string, proposalId: string) {
   const { user, party } = await partyForMember(code);
+  if (party.status !== "collecting") throw new Error("Поверніть подію до редагування перед підтвердженням пропозиції.");
   await applyMealProposal({ proposalId, party: party as Parameters<typeof applyMealProposal>[0]["party"], actorId: user.id });
   revalidatePath(`/party/${party.code}`);
 }
