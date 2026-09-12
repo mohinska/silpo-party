@@ -34,12 +34,44 @@ export type PlanningTraceEventSink = (event: PlanningTraceEvent) => void;
 export function sanitizePlanningTraceEvent(
   event: PlanningTraceEvent,
 ): PlanningTraceEvent {
+  const safeData = event.data === undefined ? undefined : safeTraceData(event);
+  const eventWithoutData = Object.fromEntries(
+    Object.entries(event).filter(([key]) => key !== "data"),
+  ) as Omit<PlanningTraceEvent, "data">;
   return {
-    ...event,
-    ...(event.data === undefined
-      ? {}
-      : { data: redactSensitiveData(event.data) }),
+    ...eventWithoutData,
+    ...(safeData === undefined ? {} : { data: safeData }),
   };
+}
+
+function safeTraceData(event: PlanningTraceEvent): unknown {
+  if (event.status === "failed") return undefined;
+  const data = event.data && typeof event.data === "object"
+    ? event.data as Record<string, unknown>
+    : undefined;
+
+  switch (event.stage) {
+    case "context":
+      return data?.status ? { status: data.status } : undefined;
+    case "signals":
+      return data?.signals && typeof data.signals === "object"
+        ? { status: (data.signals as Record<string, unknown>).completeness }
+        : undefined;
+    case "normalization":
+      return data?.mode ? { mode: data.mode } : undefined;
+    case "safety":
+      return data?.checks && Array.isArray(data.checks)
+        ? { checkCount: data.checks.length }
+        : undefined;
+    case "input":
+      return { status: event.status === "completed" ? "validated" : "received" };
+    case "prompt":
+    case "model":
+    case "contract":
+      return { status: event.status === "completed" ? "completed" : "started" };
+    default:
+      return undefined;
+  }
 }
 
 export function encodeTraceStreamEvent(event: PlanningTraceEvent): string {
@@ -50,8 +82,7 @@ function errorDetails(error: unknown): PlanningTraceError {
   if (error instanceof Error) {
     return {
       name: error.name,
-      message: error.message,
-      stack: error.stack,
+      message: error.message.replace(/(?:Bearer\s+|token|secret|password|api.?key)[^\s]*/gi, "[REDACTED]").slice(0, 240),
     };
   }
   return { name: "UnknownError", message: String(error) };
@@ -92,20 +123,20 @@ export function createPlanningTraceEmitter(
       participantId?: string,
     ) {
       stageStarts.set(keyFor(stage, participantId), now());
-      sink?.({ ...base(stage, "started", participantId), data });
+      sink?.(sanitizePlanningTraceEvent({ ...base(stage, "started", participantId), data }));
     },
     completed(
       stage: PlanningTraceStage,
       data?: unknown,
       participantId?: string,
     ) {
-      sink?.({ ...base(stage, "completed", participantId), data });
+      sink?.(sanitizePlanningTraceEvent({ ...base(stage, "completed", participantId), data }));
     },
     failed(stage: PlanningTraceStage, error: unknown, participantId?: string) {
-      sink?.({
+      sink?.(sanitizePlanningTraceEvent({
         ...base(stage, "failed", participantId),
         error: errorDetails(error),
-      });
+      }));
     },
   };
 }
@@ -121,4 +152,3 @@ export function parseTraceStreamChunk(
     .map((line) => JSON.parse(line) as PlanningTraceEvent);
   return { events, remainder };
 }
-import { redactSensitiveData } from "./context";

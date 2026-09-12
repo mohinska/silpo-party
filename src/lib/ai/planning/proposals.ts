@@ -2,7 +2,7 @@ import "server-only";
 
 import { randomUUID } from "node:crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { getPersonalSilpoContext } from "@/lib/silpo/mcp";
+import { getPersonalFoodContext } from "@/lib/silpo/mcp";
 import { readSilpoCartSnapshot, resolveSilpoProposalProducts, writeSilpoProposalLines } from "@/lib/silpo/cart";
 import type { FoodIntent, FoodProfile, Party, PartyMember } from "@/lib/parties";
 import { planEvent } from "./agent";
@@ -10,6 +10,7 @@ import { aggregateIngredients, chooseProducts, scaleRecipe } from "./meal-propos
 import { confirmMealProposal } from "./proposal-lifecycle";
 import { MealProposalSchema, type MealProposal, type ProductLine, type Recipe } from "./proposal-schemas";
 import { retrieveRecipeForRequest } from "./recipe-retrieval";
+import { createPlanningFingerprint } from "./proposal-state";
 
 function list(value: string) { return value.split(/[,;\n]/).map((item) => item.trim()).filter(Boolean); }
 function key(prefix: string, value: string, index: number) { return `${prefix}:${index}:${value.toLocaleLowerCase("uk-UA")}`.slice(0, 200); }
@@ -23,13 +24,14 @@ export function partyPlanningInput(input: { party: Party; members: PartyMember[]
     const foodIntent = !intent || intent.indifferent ? { kind: "none" as const } : intent.content_url ? { kind: "recipe" as const, recipeUrl: intent.content_url, requestedDishName: intent.dish_name || undefined, notes: intent.description || undefined } : { kind: "dish" as const, dishName: intent.dish_name || intent.description, notes: intent.description || undefined };
     return { id: member.user_id, displayName: member.display_name, preferences: { allergies: allergies.map((label, index) => ({ id: key("allergy", label, index), label })), dietaryRestrictions: restrictions.map((label, index) => ({ id: key("restriction", label, index), label, strength: "hard" as const })), likes: list(profile?.preferences ?? ""), dislikes: list(profile?.dislikes ?? ""), cuisines: [] }, foodIntent, contextCompleteness: "complete" as const };
   });
-  return { event: { id: input.party.id, title: input.party.title, startsAt: input.party.created_at, locale: "uk-UA" }, host: { participantId: input.party.host_id, displayName: input.members.find(({ user_id }) => user_id === input.party.host_id)?.display_name ?? "Host" }, budget: { amount: input.party.budget_cents / 100, currency: "UAH" }, participants };
+  return { event: { id: input.party.id, title: input.party.title, startsAt: input.party.created_at, locale: "uk-UA" }, host: { participantId: input.party.host_id, displayName: input.members.find(({ user_id }) => user_id === input.party.host_id)?.display_name ?? "Host" }, budget: input.party.budget_cents === null ? null : { amount: input.party.budget_cents / 100, currency: "UAH" }, participants };
 }
 
 export async function createMealProposal(input: { party: Party; members: PartyMember[]; profiles: FoodProfile[]; intents: FoodIntent[] }): Promise<MealProposal> {
   const planningInput = partyPlanningInput(input);
+  const inputFingerprint = createPlanningFingerprint(input);
   const { plan } = await planEvent(planningInput, { loadParticipantContext: async (participantId) => {
-    const context = await getPersonalSilpoContext(participantId);
+    const context = await getPersonalFoodContext(participantId);
     return context ? { status: "available", data: context } : { status: "unavailable", reason: "Silpo is not connected for this participant." };
   }});
   const recipes: Recipe[] = [];
@@ -64,7 +66,7 @@ export async function createMealProposal(input: { party: Party; members: PartyMe
   }
   const allUnresolved = [...unresolved, ...selection.unresolved];
   const id = randomUUID();
-  const proposal = MealProposalSchema.parse({ id, partyId: input.party.id, status: "pending", currency: "UAH", budgetCents: input.party.budget_cents, dishes: dishRows, recipes, mergedIngredients, productLines: selection.lines, estimatedTotalCents: selection.totalCents, budgetStatus: allUnresolved.length ? "unresolved" : selection.budgetStatus, alternatives: selection.alternatives, unresolved: allUnresolved, createdAt: new Date().toISOString() });
+  const proposal = MealProposalSchema.parse({ id, partyId: input.party.id, status: "pending", inputFingerprint, currency: "UAH", budgetCents: input.party.budget_cents, dishes: dishRows, recipes, mergedIngredients, productLines: selection.lines, estimatedTotalCents: selection.totalCents, budgetStatus: allUnresolved.length ? "unresolved" : selection.budgetStatus, alternatives: selection.alternatives, unresolved: allUnresolved, createdAt: new Date().toISOString() });
   const admin = createAdminClient();
   const { error } = await admin.from("ai_meal_proposals").insert({ id, party_id: input.party.id, created_by: input.party.host_id, status: "pending", proposal });
   if (error) throw error;

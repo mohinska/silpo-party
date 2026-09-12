@@ -64,7 +64,7 @@ function compatible(requirement: MergedIngredient, product: CatalogProduct) {
   return requirement.unit === product.packageUnit && product.available && product.dietarySafety === "safe" && (!requirement.readyMeal || product.readyMeal === true);
 }
 
-export function chooseProducts(requirements: MergedIngredient[], candidates: Map<string, CatalogProduct[]>, budgetCents: number) {
+export function chooseProducts(requirements: MergedIngredient[], candidates: Map<string, CatalogProduct[]>, budgetCents: number | null) {
   const selections: Array<{ requirement: MergedIngredient; product: CatalogProduct }> = [];
   const unresolved: Array<{ requirementKey: string; reason: string }> = [];
   const requirementGroups = new Map<string, MergedIngredient[]>();
@@ -102,12 +102,12 @@ export function chooseProducts(requirements: MergedIngredient[], candidates: Map
   });
   lines.sort((a, b) => `${a.productId}|${a.companyId}|${a.branchId}`.localeCompare(`${b.productId}|${b.companyId}|${b.branchId}`));
   let totalCents = lines.reduce((sum, line) => sum + line.lineTotalCents, 0);
-  if (totalCents > budgetCents) {
+  if (budgetCents !== null && totalCents > budgetCents) {
     const optionalKeys = new Set(requirements.filter((item) => item.optional).map((item) => item.key));
     const withoutOptional = lines.filter((line) => !line.requirementKeys.every((key) => optionalKeys.has(key)));
     const cheaperTotal = withoutOptional.reduce((sum, line) => sum + line.lineTotalCents, 0);
     if (cheaperTotal <= budgetCents) { lines = withoutOptional; totalCents = cheaperTotal; }
   }
-  const alternatives = totalCents > budgetCents ? [{ kind: "increase_budget" as const, description: `Increase the shared budget by ${(totalCents - budgetCents) / 100} UAH while keeping every requested dish.`, amountCents: totalCents - budgetCents }] : [];
-  return { lines, totalCents, unresolved, budgetStatus: unresolved.length ? "unresolved" as const : totalCents > budgetCents ? "over" as const : "within" as const, alternatives };
+  const alternatives = budgetCents !== null && totalCents > budgetCents ? [{ kind: "increase_budget" as const, description: `Increase the shared budget by ${(totalCents - budgetCents) / 100} UAH while keeping every requested dish.`, amountCents: totalCents - budgetCents }] : [];
+  return { lines, totalCents, unresolved, budgetStatus: unresolved.length ? "unresolved" as const : budgetCents !== null && totalCents > budgetCents ? "over" as const : "within" as const, alternatives };
 }

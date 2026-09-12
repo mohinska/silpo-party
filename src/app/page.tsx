@@ -1,10 +1,13 @@
 import Link from "next/link";
 import { getCurrentUser } from "@/lib/auth";
+import { AppHeader } from "@/components/app-header";
+import { GoogleLoginButton } from "@/components/google-login-button";
 
 export default async function Home() {
   const user = await getCurrentUser();
   return (
     <main className="landing">
+      {user && <AppHeader user={user} backHref="/" />}
       <section className="hero-card">
         <div className="brand-mark">СФ</div>
         <p className="eyebrow">Сільпо Family</p>
@@ -13,11 +16,9 @@ export default async function Home() {
           Враховуємо побажання та обмеження кожного учасника події й складаємо один оптимальний кошик.
         </p>
         {user ? (
-          <div className="hero-actions"><Link className="primary-button" href="/parties">Мої події</Link><Link className="secondary-button" href="/profile">Профіль</Link></div>
+          <div className="hero-actions"><Link className="primary-button" href="/parties">Мої події</Link></div>
         ) : (
-          <a className="google-button" href="/auth/google">
-            <span className="google-g">G</span> Увійти через Google
-          </a>
+          <GoogleLoginButton href="/auth/google" label="Продовжити з Google" />
         )}
         <p className="privacy-note">Вхід створює ваш окремий акаунт у застосунку.</p>
       </section>

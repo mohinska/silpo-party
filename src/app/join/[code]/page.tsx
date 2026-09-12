@@ -2,6 +2,7 @@ import Link from "next/link";
 import { PendingButton } from "@/components/pending-button";
 import { getCurrentUser } from "@/lib/auth";
 import { joinParty } from "@/app/parties/actions";
+import { GoogleLoginButton } from "@/components/google-login-button";
 
 export default async function JoinPage({ params }: PageProps<"/join/[code]">) {
   const { code: rawCode } = await params;
@@ -18,7 +19,7 @@ export default async function JoinPage({ params }: PageProps<"/join/[code]">) {
         {user ? (
           <form action={joinAction}><PendingButton className="primary-button" pendingLabel="Приєднуємо…">Приєднатися</PendingButton></form>
         ) : (
-          <a className="google-button" href={`/auth/google?next=${encodeURIComponent(`/join/${code}`)}`}><span className="google-g">G</span> Увійти й приєднатися</a>
+          <GoogleLoginButton href={`/auth/google?next=${encodeURIComponent(`/join/${code}`)}`} label="Увійти й приєднатися" />
         )}
         <p className="privacy-note"><Link href="/">На головну</Link></p>
       </section>

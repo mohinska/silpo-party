@@ -23,4 +23,18 @@ describe("main supervisor", () => {
     });
     expect(result.actions[0]).toEqual({ type: "parse_intent" });
   });
+
+  it("does not block an actionable request just because the budget is missing", async () => {
+    const result = await runSupervisorDecision({
+      partyState: { hasIntent: true, hasBudget: false, hasProposal: false },
+      message: "додай колу",
+      generate: async () => JSON.stringify({
+        actions: [{ type: "ask_user", question: "Вкажіть бюджет." }],
+        reply: "Вкажіть бюджет.",
+      }),
+    });
+
+    expect(result.actions.map((action) => action.type)).toEqual(["build_basket", "review_constraints"]);
+    expect(result.reply).toContain("кошик");
+  });
 });

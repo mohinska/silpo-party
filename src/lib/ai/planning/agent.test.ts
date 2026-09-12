@@ -198,20 +198,10 @@ describe("planEvent", () => {
     ]);
     expect(events.find(({ stage, status }) =>
       stage === "context" && status === "completed",
-    )?.data).toMatchObject({
-      raw: {
-        silpo_get_my_favorites: {
-          structuredContent: { items: [{ name: "Тофу" }] },
-        },
-      },
-    });
+    )?.data).toMatchObject({ status: "available" });
     expect(events.find(({ stage, status }) =>
       stage === "prompt" && status === "completed",
-    )?.data).toMatchObject({
-      system: expect.any(String),
-      prompt: expect.any(String),
-      input: expect.any(Object),
-    });
+    )?.data).toEqual({ status: "completed" });
   });
 
   it("emits the original provider failure at the model stage", async () => {

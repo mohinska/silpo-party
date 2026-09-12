@@ -2,7 +2,7 @@ import "server-only";
 
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { readToolData, type SilpoTool, withSilpoMcp } from "@/lib/silpo/mcp";
+import { readToolData, type SilpoTool, withSilpoMcp, withSilpoMcpAccessToken } from "@/lib/silpo/mcp";
 import type { CatalogProduct, MergedIngredient, ProductLine, Unit } from "@/lib/ai/planning/proposal-schemas";
 import { productSearchQueries, rankCatalogCandidates } from "@/lib/ai/planning/product-agent";
 
@@ -283,27 +283,49 @@ function queryGroups(value: unknown, context: CartContext) {
 
 /** Returns MCP-ranked, store-specific products for a user to explicitly choose. */
 export async function findSilpoProducts(hostId: string, query: string): Promise<SilpoProductOption[]> {
-  return withSilpoMcp(hostId, async (client, tools) => {
+  return withSilpoMcp(hostId, (client, tools) => findSilpoProductsInSession(client, tools, query));
+}
+
+export async function findSilpoProductsWithAccessToken(accessToken: string, query: string): Promise<SilpoProductOption[]> {
+  const result = await findSilpoProductsBatchWithAccessToken(accessToken, [query]);
+  return result.get(query) ?? [];
+}
+
+export async function findSilpoProductsBatchWithAccessToken(accessToken: string, queries: string[]): Promise<Map<string, SilpoProductOption[]>> {
+  return withSilpoMcpAccessToken(accessToken, (client, tools) => findSilpoProductsBatchInSession(client, tools, queries));
+}
+
+async function findSilpoProductsInSession(client: Pick<Client, "callTool">, tools: Map<string, SilpoTool>, query: string): Promise<SilpoProductOption[]> {
+  const result = await findSilpoProductsBatchInSession(client, tools, [query]);
+  return result.get(query) ?? [];
+}
+
+async function findSilpoProductsBatchInSession(client: Pick<Client, "callTool">, tools: Map<string, SilpoTool>, queries: string[]): Promise<Map<string, SilpoProductOption[]>> {
+  const uniqueQueries = [...new Set(queries.map((query) => query.trim()).filter(Boolean))];
+  if (!uniqueQueries.length) return new Map();
     const context = await getCartContext(client, tools);
     const data = await callTool(client, tools, "silpo_find_products_batch", "find", context, {
-      queries: [{ name: query, quantity: 1 }],
+      queries: uniqueQueries.flatMap((query) => productSearchQueries({ name: query }).map((name) => ({ name, quantity: 1 }))),
     });
-    const candidates = queryGroups(data, context).get(searchKey(query)) ?? productCandidates(data, context);
-    return candidates
-      // Search results must explicitly confirm stock in the Host's selected
-      // Silpo branch; unknown or unavailable products are not selectable.
-      .filter((candidate) => candidate.companyId && candidate.branchId && availabilityFromProduct(candidate.evidence) === true)
-      .slice(0, 12)
-      .map((candidate) => ({
-        productId: candidate.productId,
-        companyId: candidate.companyId!,
-        branchId: candidate.branchId!,
-        name: candidate.name,
-        priceCents: candidate.priceCents,
-        displayRatio: candidate.displayRatio,
-        imageUrl: candidate.imageUrl,
-      }));
-  });
+    const grouped = queryGroups(data, context);
+    return new Map(uniqueQueries.map((query) => {
+      const candidates = productSearchQueries({ name: query }).flatMap((name) => grouped.get(searchKey(name)) ?? []);
+      const uniqueCandidates = [...new Map(candidates.map((candidate) => [candidate.productId, candidate])).values()];
+      return [query, uniqueCandidates
+        // Search results must explicitly confirm stock in the Host's selected
+        // Silpo branch; unknown or unavailable products are not selectable.
+        .filter((candidate) => candidate.companyId && candidate.branchId && availabilityFromProduct(candidate.evidence) === true)
+        .slice(0, 12)
+        .map((candidate) => ({
+          productId: candidate.productId,
+          companyId: candidate.companyId!,
+          branchId: candidate.branchId!,
+          name: candidate.name,
+          priceCents: candidate.priceCents,
+          displayRatio: candidate.displayRatio,
+          imageUrl: candidate.imageUrl,
+        }))];
+    }));
 }
 
 /** Bound untrusted MCP trees before reusing the legacy product/context parsers. */

@@ -11,6 +11,10 @@ const PERSONAL_TOOLS = [
   "silpo_get_my_food_restrictions",
   "silpo_get_my_favorites",
 ] as const;
+const FOOD_CONTEXT_TOOLS = [
+  "silpo_get_my_food_restrictions",
+  "silpo_get_my_favorites",
+] as const;
 
 export type PersonalContext = Record<string, unknown>;
 
@@ -54,7 +58,17 @@ export async function withSilpoMcp<T>(
   userId: string,
   operation: (client: Client, tools: Map<string, SilpoTool>) => Promise<T>,
 ) {
-  const session = await openSilpoMcpSession(userId);
+  const accessToken = await getAccessToken(userId);
+  if (!accessToken) throw new Error("Організатор має підключити акаунт «Сільпо» у профілі.");
+  return withSilpoMcpAccessToken(accessToken, operation);
+}
+
+export async function withSilpoMcpAccessToken<T>(
+  accessToken: string | null,
+  operation: (client: Client, tools: Map<string, SilpoTool>) => Promise<T>,
+) {
+  if (!accessToken) throw new Error("Silpo MCP access token is required.");
+  const session = await openSilpoMcpSessionWithAccessToken(accessToken);
   try {
     return await operation(session.client, session.tools);
   } finally {
@@ -71,10 +85,18 @@ export async function withDiscoveredSilpoTools<T>(
 }
 
 export async function getPersonalSilpoContext(userId: string): Promise<PersonalContext | null> {
+  return getPersonalContext(userId, PERSONAL_TOOLS);
+}
+
+export async function getPersonalFoodContext(userId: string): Promise<PersonalContext | null> {
+  return getPersonalContext(userId, FOOD_CONTEXT_TOOLS);
+}
+
+async function getPersonalContext(userId: string, allowedTools: readonly string[]): Promise<PersonalContext | null> {
   try {
     return await withSilpoMcp(userId, async (client, tools) => {
       const entries = await Promise.all(
-        PERSONAL_TOOLS.filter((name) => tools.has(name)).map(async (name) => [
+        allowedTools.filter((name) => tools.has(name)).map(async (name) => [
           name,
           readToolData(await client.callTool({ name, arguments: {} })),
         ]),

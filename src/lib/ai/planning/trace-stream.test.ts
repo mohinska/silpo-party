@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   encodeTraceStreamEvent,
+  createPlanningTraceEmitter,
   parseTraceStreamChunk,
   sanitizePlanningTraceEvent,
   type PlanningTraceEvent,
@@ -35,7 +36,7 @@ describe("parseTraceStreamChunk", () => {
 });
 
 describe("trace stream serialization", () => {
-  it("redacts credential fields while preserving inspectable payloads", () => {
+  it("keeps food payloads out of serialized traces", () => {
     const event: PlanningTraceEvent = {
       stage: "context",
       status: "completed",
@@ -47,13 +48,22 @@ describe("trace stream serialization", () => {
       },
     };
 
-    expect(sanitizePlanningTraceEvent(event)).toMatchObject({
-      data: {
-        headers: { authorization: "[REDACTED]" },
-        structuredContent: { items: [{ name: "Тофу" }] },
-      },
-    });
+    expect(sanitizePlanningTraceEvent(event)).not.toHaveProperty("data.structuredContent");
+    expect(JSON.stringify(sanitizePlanningTraceEvent(event))).not.toContain("Тофу");
     expect(encodeTraceStreamEvent(event)).toMatch(/\n$/);
     expect(encodeTraceStreamEvent(event)).not.toContain("private-token");
+  });
+
+  it("sanitizes events before sending them to a trace sink", () => {
+    const events: PlanningTraceEvent[] = [];
+    const emitter = createPlanningTraceEmitter((event) => events.push(event));
+
+    emitter.completed("context", {
+      raw: { silpo_get_my_favorites: { items: [{ name: "Тофу" }] } },
+      status: "available",
+    });
+
+    expect(JSON.stringify(events)).not.toContain("Тофу");
+    expect(events[0].data).toEqual({ status: "available" });
   });
 });
