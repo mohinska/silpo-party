@@ -15,7 +15,9 @@ export interface HostCommerceAuthorityRepository {
   resolveApprovedHost(input: { operationId: string; actorId: string }): Promise<{ partyId: string; hostId: string; approvedBy: string } | null>;
 }
 type ApprovedHostOperationReader = (operationId: string) => Promise<{ partyId: string; hostId: string; approvedBy: string } | null>;
-type PartyHostReader = (partyId: string) => Promise<{ partyId: string; hostId: string } | null>;
+type PartyHostLookup = { partyId: string; actorId: string };
+type PartyHostAuthorityRow = { partyId: string; hostId: string; memberPartyId: string; memberUserId: string };
+type PartyHostReader = (input: PartyHostLookup) => Promise<PartyHostAuthorityRow | null>;
 
 async function readApprovedHostOperation(operationId: string) {
   const admin = createAdminClient();
@@ -25,9 +27,22 @@ async function readApprovedHostOperation(operationId: string) {
   if (partyError || !party) return null;
   return { partyId: operation.party_id, hostId: party.host_id, approvedBy: operation.approved_by };
 }
-async function readPartyHost(partyId: string) {
-  const { data, error } = await createAdminClient().from("parties").select("id, host_id").eq("id", z.uuid().parse(partyId)).maybeSingle();
-  return error || !data ? null : { partyId: data.id, hostId: data.host_id };
+async function readPartyHost(input: PartyHostLookup) {
+  const partyId = z.uuid().parse(input.partyId);
+  const actorId = z.uuid().parse(input.actorId);
+  const { data, error } = await createAdminClient()
+    .from("party_members")
+    .select("party_id,user_id,parties!inner(id,host_id)")
+    .eq("party_id", partyId)
+    .eq("user_id", actorId)
+    .maybeSingle();
+  if (error || !data) return null;
+  const row = z.object({
+    party_id: z.uuid(),
+    user_id: z.uuid(),
+    parties: z.object({ id: z.uuid(), host_id: z.uuid() }),
+  }).parse(data);
+  return { partyId: row.parties.id, hostId: row.parties.host_id, memberPartyId: row.party_id, memberUserId: row.user_id };
 }
 
 /** Repository-backed authority resolution. The default reader is server-only;
@@ -41,11 +56,13 @@ export function createHostCommerceAuthorityRepository(read: ApprovedHostOperatio
   };
 }
 export function createPartyHostCommerceAuthorityRepository(read: PartyHostReader = readPartyHost) {
-  return { async resolvePartyHost(partyId: string) { return read(partyId); } };
+  return { async resolvePartyHost(input: PartyHostLookup) { return read(input); } };
 }
-export async function resolveVerifiedPartyHostCommerceAuthority(partyId: string, repository: { resolvePartyHost(partyId: string): Promise<{ partyId: string; hostId: string } | null> }): Promise<VerifiedPartyHostCommerceAuthority> {
-  const resolved = await repository.resolvePartyHost(partyId);
-  if (!resolved || resolved.partyId !== partyId) throw new CommerceError("approval_required", "Verified party Host authority required");
+export async function resolveVerifiedPartyHostCommerceAuthority(input: PartyHostLookup, repository: { resolvePartyHost(input: PartyHostLookup): Promise<PartyHostAuthorityRow | null> }): Promise<VerifiedPartyHostCommerceAuthority> {
+  const partyId = z.string().trim().min(1).parse(input.partyId);
+  const actorId = z.string().trim().min(1).parse(input.actorId);
+  const resolved = await repository.resolvePartyHost({ partyId, actorId });
+  if (!resolved || resolved.partyId !== partyId || resolved.memberPartyId !== partyId || resolved.memberUserId !== actorId) throw new CommerceError("approval_required", "Verified party Host authority required");
   const authority = Object.freeze({ scope: "party_read" as const, hostId: resolved.hostId, partyId, [authorityBrand]: true }) as VerifiedPartyHostCommerceAuthority;
   issuedAuthority.add(authority);
   return authority;
