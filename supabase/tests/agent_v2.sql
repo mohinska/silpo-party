@@ -7,19 +7,19 @@ select extensions.has_column('public', 'party_agent_queue', 'next_attempt_at', '
 select extensions.ok(not has_table_privilege('authenticated', 'public.party_agent_workspaces', 'select'), 'workspace is service-only');
 select extensions.ok(not has_table_privilege('anon', 'public.party_agent_steps', 'select'), 'steps are private');
 select extensions.ok(not has_function_privilege('authenticated', 'public.agent_v2_claim(text,integer)', 'execute'), 'claim is service-only');
-select extensions.ok(not has_function_privilege('authenticated', 'public.agent_v2_checkpoint_and_ack(uuid,text,bigint,bigint,bigint,bigint,bigint,jsonb,jsonb,jsonb,jsonb,text,boolean,jsonb,text,timestamptz)', 'execute'), 'atomic checkpoint transition is service-only');
+select extensions.ok(not has_function_privilege('authenticated', 'public.agent_v2_checkpoint_and_ack(uuid,text,bigint,bigint,bigint,bigint,bigint,jsonb,jsonb,jsonb,jsonb,text,boolean,jsonb,text,timestamptz,jsonb)', 'execute'), 'atomic checkpoint transition is service-only');
 select extensions.ok(not exists(select 1 from pg_policies where tablename='profiles' and policyname='Party members read shared food profiles'), 'shared profile policy removed');
 select extensions.ok(not exists(select 1 from pg_publication_tables where pubname='supabase_realtime' and tablename in ('party_agent_workspaces','party_agent_steps','party_agent_events','party_agent_queue','party_cart_operations')), 'raw state is not published');
 select extensions.ok(not has_table_privilege('authenticated','public.party_agent_drafts','insert'), 'members cannot publish drafts');
 select extensions.ok(not has_table_privilege('anon','public.party_cart_operations','insert'), 'anon cannot approve carts');
 select extensions.ok(not has_function_privilege('authenticated','public.agent_v2_enqueue(uuid,uuid,text,text,jsonb,boolean,jsonb)','execute'), 'authenticated cannot impersonate event actors');
 
-insert into auth.users(id) values ('00000000-0000-0000-0000-000000000001'), ('00000000-0000-0000-0000-000000000002'), ('00000000-0000-0000-0000-000000000003');
+insert into auth.users(id) values ('00000000-0000-0000-0000-000000000001'), ('00000000-0000-0000-0000-000000000002'), ('00000000-0000-0000-0000-000000000003'), ('00000000-0000-0000-0000-000000000004');
 insert into public.parties(id, code, title, host_id) values ('10000000-0000-0000-0000-000000000001','V2TEST01','test','00000000-0000-0000-0000-000000000001');
 insert into public.party_members(party_id,user_id,role,display_name) values
  ('10000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','host','Host'),
  ('10000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000002','member','Member');
-insert into public.profiles(id) values('00000000-0000-0000-0000-000000000001'),('00000000-0000-0000-0000-000000000002') on conflict do nothing;
+insert into public.profiles(id) values('00000000-0000-0000-0000-000000000001'),('00000000-0000-0000-0000-000000000002'),('00000000-0000-0000-0000-000000000004') on conflict do nothing;
 set local role service_role;
 select public.agent_v2_enqueue('10000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000002','event-1','chat','{"text":"Rice"}',false,'{"schemaVersion":2,"partyId":"10000000-0000-0000-0000-000000000001","inputRevision":0,"draftRevision":0,"participants":{},"requests":[],"artifacts":[],"evidence":[],"outcomes":[],"draft":null}');
 select public.agent_v2_enqueue('10000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000002','event-1','chat','{"text":"Rice"}',false,'{}');
@@ -107,6 +107,22 @@ insert into public.party_chat_messages(party_id,role,content,recipient_id) value
  ('10000000-0000-0000-0000-000000000001','assistant','Shared answer',null);
 insert into public.party_chat_messages(party_id,participant_id,role,content,recipient_id) values
  ('10000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000002','user','Private answer','00000000-0000-0000-0000-000000000002');
+
+-- Private notices (p_notices): isolated party and a user not referenced by
+-- the RLS section below, so this block cannot shift those message counts.
+-- Proves a notice never sets waiting_for_input and never blocks approval.
+insert into public.parties(id, code, title, host_id) values ('10000000-0000-0000-0000-000000000003','V2TEST03','notices-test','00000000-0000-0000-0000-000000000004');
+insert into public.party_members(party_id,user_id,role,display_name) values ('10000000-0000-0000-0000-000000000003','00000000-0000-0000-0000-000000000004','host','Host');
+select public.agent_v2_enqueue('10000000-0000-0000-0000-000000000003','00000000-0000-0000-0000-000000000004','notice-event','chat','{"text":"Rice"}',false,'{"schemaVersion":2,"partyId":"10000000-0000-0000-0000-000000000003","inputRevision":0,"draftRevision":0,"participants":{},"requests":[],"artifacts":[],"evidence":[],"outcomes":[],"draft":null}');
+create temporary table notice_claim as select * from public.agent_v2_claim('worker-notice',60);
+select public.agent_v2_checkpoint((select job_id from notice_claim),'worker-notice',(select fence from notice_claim),0,0,1,1,(select workspace from public.party_agent_workspaces where party_id='10000000-0000-0000-0000-000000000003'),'[]','{}',null,null,true,null,'[{"id":"50000000-0000-4000-8000-000000000001","recipientId":"00000000-0000-0000-0000-000000000004","content":"Check this item against your restriction."}]'::jsonb);
+select public.agent_v2_ack((select job_id from notice_claim),'worker-notice',(select fence from notice_claim),1,'completed');
+select extensions.is((select status from public.party_chat_messages where id='50000000-0000-4000-8000-000000000001'),'completed','private notice never sets waiting_for_input');
+select extensions.is((select recipient_id from public.party_chat_messages where id='50000000-0000-4000-8000-000000000001'),'00000000-0000-0000-0000-000000000004'::uuid,'notice reaches only its named recipient');
+insert into public.party_agent_drafts(party_id,draft_revision,input_revision,ready,projection) values('10000000-0000-0000-0000-000000000003',1,0,true,'{"schemaVersion":2,"partyId":"10000000-0000-0000-0000-000000000003","inputRevision":0,"draftRevision":1,"ready":true,"lines":[],"totalCents":0,"unresolvedCount":0,"blockerCodes":[]}');
+update public.party_agent_workspaces set draft_revision=1 where party_id='10000000-0000-0000-0000-000000000003';
+select extensions.lives_ok($$select public.agent_v2_approve('10000000-0000-0000-0000-000000000003','00000000-0000-0000-0000-000000000004',1,'notice-approve')$$,'a private notice does not block Host approval');
+
 reset role;
 set local role authenticated;
 select set_config('request.jwt.claim.sub','00000000-0000-0000-0000-000000000001',true);

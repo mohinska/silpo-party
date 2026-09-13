@@ -24,9 +24,9 @@ describe("participant-scoped context loader", () => {
     const result = await load(participantId, "profile", 0);
     expect(result).toMatchObject({ status: "success", source: "profile", favorites: ["spicy", "Ukrainian"] });
     expect(result.rules).toEqual(expect.arrayContaining([
-      expect.objectContaining({ kind: "semantic", value: "peanut" }),
-      expect.objectContaining({ kind: "semantic", value: "vegan" }),
-      expect.objectContaining({ kind: "exclude_term", value: "cilantro" }),
+      expect.objectContaining({ kind: "semantic", value: "peanut", ownerId: participantId }),
+      expect.objectContaining({ kind: "semantic", value: "vegan", ownerId: participantId }),
+      expect.objectContaining({ kind: "exclude_term", value: "cilantro", ownerId: participantId }),
     ]));
   });
 
