@@ -28,6 +28,8 @@ function canonical(value: unknown): string {
 function same(a: unknown, b: unknown) { return canonical(a) === canonical(b); }
 function normalized(snapshot: CartSnapshot): CartSnapshot { return { ...CartSnapshotSchema.parse(snapshot), lines: sortLines(snapshot.lines) }; }
 function context(snapshot: CartSnapshot) { return CartContextSchema.parse(Object.fromEntries(Object.keys(CartContextSchema.shape).map(k => [k, snapshot[k as keyof CartSnapshot]]))); }
+function cartState(snapshot: CartSnapshot) { return Object.fromEntries(Object.entries(normalized(snapshot)).filter(([key]) => key !== "cartVersion")); }
+function sameCartState(a: CartSnapshot, b: CartSnapshot) { return same(cartState(a), cartState(b)); }
 
 /** Managed identities are owned wholly by this app. An external line with an
  * overlapping identity is a conflict; no guessed subtraction of user quantities. */
@@ -85,25 +87,26 @@ export async function applyApprovedCart(input: ApplyInput, repository: CartOpera
     expected = normalized(plan.snapshot);
     await repository.prepare({ operationId: input.operationId, workerId: input.workerId, baseline, expectedCart: { snapshot: expected, managed: plan.managed }, changes: plan.changes });
     let progress = baseline;
-    // Each remote write is preceded by readback of all current lines. MCP has no
-    // cart CAS, so a remote edit racing after this read remains a transport limit.
+    // Writes carry the freshly read opaque cartVersion. A contract without that
+    // conditional token is rejected by the adapter before any write is possible.
     for (const kind of ["set", "remove"] as const) {
       const changes = plan.changes.filter(c => c.kind === kind);
       for (let offset = 0; offset < changes.length; offset += 30) {
         input.signal?.throwIfAborted();
         const before = normalized(await api.cart());
-        if (!same(before, progress)) throw new CommerceError("conflict", "External cart change before write");
+        if (!sameCartState(before, progress)) throw new CommerceError("conflict", "External cart change before conditional write");
         const lines = changes.slice(offset, offset + 30).map(c => c.line);
         wrote = true; // Set before dispatch; timeouts cannot prove rejection.
-        if (kind === "set") await api.setQuantities(baseline, lines); else await api.remove(baseline, lines);
+        if (kind === "set") await api.setQuantities(before, lines); else await api.remove(before, lines);
         const next = [...progress.lines.filter(l => !lines.some(c => productKey(c) === productKey(l))), ...(kind === "set" ? lines : [])];
-        progress = normalized({ ...progress, lines: next, totalCents: next.reduce((sum, l) => sum + l.lineTotalCents, 0) });
+        const intended = normalized({ ...progress, lines: next, totalCents: next.reduce((sum, l) => sum + l.lineTotalCents, 0) });
         const after = normalized(await api.cart());
-        if (!same(after, progress)) throw new CommerceError("unknown_write", "Cart readback differs from intended progress");
+        if (!sameCartState(after, intended)) throw new CommerceError("unknown_write", "Cart readback differs from intended conditional write");
+        progress = after;
       }
     }
     const readback = normalized(await api.cart());
-    if (!same(readback, expected)) throw new CommerceError("unknown_write", "Cart additions, removals, totals or validation failed verification");
+    if (!sameCartState(readback, expected)) throw new CommerceError("unknown_write", "Cart additions, removals, totals or validation failed verification");
     await repository.finish({ operationId: input.operationId, workerId: input.workerId, status: "verified", readback });
     return { status: "verified" as const, readback };
   } catch (error) {
@@ -113,7 +116,7 @@ export async function applyApprovedCart(input: ApplyInput, repository: CartOpera
     }
     let readback: CartSnapshot | null = null;
     try { readback = normalized(await api.cart()); } catch { /* Keep operation lock. */ }
-    const status = expected && readback && same(readback, expected) ? "verified" as const : "unknown" as const;
+    const status = expected && readback && sameCartState(readback, expected) ? "verified" as const : "unknown" as const;
     await repository.finish({ operationId: input.operationId, workerId: input.workerId, status, readback, privateError: status === "unknown" ? "write_requires_reconciliation" : undefined });
     return { status, readback };
   }
@@ -127,7 +130,7 @@ export async function reconcileCartOperation(input: ApplyInput, repository: Cart
   if (!["unknown", "applying"].includes(op.status) || !op.expected_cart) throw new CommerceError("conflict", "Operation has no prepared recovery plan");
   input.signal?.throwIfAborted();
   const readback = normalized(await api.cart());
-  const status = same(readback, op.expected_cart.snapshot) ? "verified" as const : "unknown" as const;
+  const status = sameCartState(readback, op.expected_cart.snapshot) ? "verified" as const : "unknown" as const;
   await repository.finish({ operationId: input.operationId, workerId: input.workerId, status, readback, privateError: status === "unknown" ? "write_requires_reconciliation" : undefined });
   return { status, readback };
 }

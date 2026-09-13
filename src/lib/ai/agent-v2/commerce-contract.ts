@@ -4,11 +4,12 @@ import { setTimeout as delay } from "node:timers/promises";
 import { DraftProductSchema } from "./draft";
 
 const id = z.string().trim().min(1).max(200);
+const cartVersion = z.string().trim().min(1).max(500);
 const cents = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const identity = { productId: id, companyId: id, branchId: id };
 export const CartContextSchema = z.object({ cartId: id, companyId: id, branchId: id, deliveryType: id, timeslotStart: z.iso.datetime({ offset: true }), timeslotEnd: z.iso.datetime({ offset: true }) }).strict();
 export const CartLineSchema = z.object({ ...identity, quantity: z.number().int().positive(), unitPriceCents: cents, lineTotalCents: cents }).strict();
-export const CartSnapshotSchema = CartContextSchema.extend({ lines: z.array(CartLineSchema).max(500), totalCents: cents, validationErrors: z.array(z.string()).max(100) }).superRefine((cart, ctx) => {
+export const CartSnapshotSchema = CartContextSchema.extend({ cartVersion, lines: z.array(CartLineSchema).max(500), totalCents: cents, validationErrors: z.array(z.string()).max(100) }).superRefine((cart, ctx) => {
   if (new Set(cart.lines.map(productKey)).size !== cart.lines.length) ctx.addIssue({ code: "custom", message: "Duplicate cart line identity" });
   if (cart.lines.some(l => l.quantity * l.unitPriceCents !== l.lineTotalCents) || cart.lines.reduce((sum, l) => sum + l.lineTotalCents, 0) !== cart.totalCents) ctx.addIssue({ code: "custom", message: "Unsupported cart totals or discounts" });
 });
@@ -52,8 +53,18 @@ const inputSchemas = {
   silpo_find_products_batch: context.extend({ queries: z.array(id).min(1).max(30) }),
   silpo_get_product_details: context.extend({ productId: id }),
   silpo_get_replacements: context.extend({ productId: id }),
-  silpo_add_or_update_cart_products: context.extend({ products: z.array(z.object({ ...identity, quantity: z.number().int().positive() }).strict()).min(1).max(30) }),
-  silpo_remove_cart_products: context.extend({ products: z.array(z.object(identity).strict()).min(1).max(30) }),
+  silpo_add_or_update_cart_products: context.extend({ cartVersion, products: z.array(z.object({ ...identity, quantity: z.number().int().positive() }).strict()).min(1).max(30) }),
+  silpo_remove_cart_products: context.extend({ cartVersion, products: z.array(z.object(identity).strict()).min(1).max(30) }),
+};
+const outputSchemas = {
+  silpo_get_my_shopping_cart: z.object({ exists: z.boolean(), shoppingCartId: id.optional() }).strict(),
+  silpo_get_shopping_cart_by_id: CartSnapshotSchema,
+  silpo_get_time_slots: z.object({ slots: z.array(z.object({ start: z.string(), end: z.string(), available: z.boolean() }).strict()) }).strict(),
+  silpo_find_products_batch: z.object({ products: z.array(WireProductSchema).max(300) }).strict(),
+  silpo_get_product_details: WireProductSchema,
+  silpo_get_replacements: z.object({ products: z.array(WireProductSchema).max(300) }).strict(),
+  silpo_add_or_update_cart_products: empty,
+  silpo_remove_cart_products: empty,
 };
 type ToolName = keyof typeof inputSchemas;
 export type ListedCommerceTool = { name: string; inputSchema?: Record<string, unknown>; outputSchema?: Record<string, unknown>; annotations?: { readOnlyHint?: boolean } };
@@ -62,7 +73,7 @@ export type ListedCommerceTool = { name: string; inputSchema?: Record<string, un
 export const supportedContractFixture = {
   provenance: "synthetic-development-fixture-NOT-live-verified",
   version: "commerce-v2-fixture-1",
-  tools: Object.entries(inputSchemas).map(([name, schema]) => ({ name, inputSchema: z.toJSONSchema(schema) as Record<string, unknown> })),
+  tools: Object.entries(inputSchemas).map(([name, schema]) => ({ name, inputSchema: z.toJSONSchema(schema) as Record<string, unknown>, outputSchema: z.toJSONSchema(outputSchemas[name as ToolName]) as Record<string, unknown> })),
 };
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return JSON.stringify(value.map(canonical).sort());
@@ -82,14 +93,14 @@ function resultData(input: unknown): unknown {
 export function createMcpCommerceAdapter(tools: ListedCommerceTool[], call: Call, options: { now?: () => string; signal?: AbortSignal } = {}) {
   for (const supported of supportedContractFixture.tools) {
     const actual = tools.find(t => t.name === supported.name);
-    if (!actual || canonical(actual.inputSchema) !== canonical(supported.inputSchema)) throw new CommerceError("contract", `Unsupported MCP contract: ${supported.name}`);
+    if (!actual || canonical(actual.inputSchema) !== canonical(supported.inputSchema) || canonical(actual.outputSchema) !== canonical(supported.outputSchema)) throw new CommerceError("contract", `Unsupported MCP contract: ${supported.name}`);
   }
   const now = options.now ?? (() => new Date().toISOString());
-  async function invoke(name: ToolName, args: unknown, write = false) {
+  async function invoke<N extends ToolName>(name: N, args: unknown, write = false): Promise<z.infer<(typeof outputSchemas)[N]>> {
     const parsed = inputSchemas[name].parse(args);
     const run = async () => {
       options.signal?.throwIfAborted();
-      try { return resultData(await call({ name, arguments: parsed }, { signal: options.signal, timeout: 10_000 })); }
+      try { return outputSchemas[name].parse(resultData(await call({ name, arguments: parsed }, { signal: options.signal, timeout: 10_000 }))) as z.output<(typeof outputSchemas)[N]>; }
       catch (error) {
         if (write) throw new CommerceError("unknown_write", "Remote write result requires reconciliation");
         if (error instanceof CommerceError || error instanceof z.ZodError) throw error;
@@ -108,27 +119,27 @@ export function createMcpCommerceAdapter(tools: ListedCommerceTool[], call: Call
   }
   return {
     async cart(): Promise<CartSnapshot> {
-      const active = z.object({ exists: z.boolean(), shoppingCartId: id.optional() }).strict().parse(await invoke("silpo_get_my_shopping_cart", {}));
+      const active = await invoke("silpo_get_my_shopping_cart", {});
       if (!active.exists || !active.shoppingCartId) throw new CommerceError("unavailable", "Host must prepare an active Silpo cart");
-      const cart = CartSnapshotSchema.parse(await invoke("silpo_get_shopping_cart_by_id", { shoppingCartId: active.shoppingCartId }));
+      const cart = await invoke("silpo_get_shopping_cart_by_id", { shoppingCartId: active.shoppingCartId });
       if (cart.cartId !== active.shoppingCartId) throw new CommerceError("contract", "Active cart identity mismatch");
-      const slots = z.object({ slots: z.array(z.object({ start: z.string(), end: z.string(), available: z.boolean() }).strict()) }).strict().parse(await invoke("silpo_get_time_slots", ctx(cart)));
+      const slots = await invoke("silpo_get_time_slots", ctx(cart));
       if (!slots.slots.some(s => s.available && s.start === cart.timeslotStart && s.end === cart.timeslotEnd) || Date.parse(cart.timeslotEnd) <= Date.parse(now())) throw new CommerceError("unavailable", "Selected cart slot is unavailable");
       return cart;
     },
     async search(cart: CartContext, queries: string[]) {
       if (!queries.length || queries.length > 30) throw new CommerceError("contract", "Search requires 1 to 30 queries");
-      const data = z.object({ products: z.array(WireProductSchema).max(300) }).strict().parse(await invoke("silpo_find_products_batch", { ...ctx(cart), queries }));
+      const data = await invoke("silpo_find_products_batch", { ...ctx(cart), queries });
       // Search is discovery only: composition provenance requires a detail read.
       return data.products.map(p => ({ productId: p.productId, companyId: p.companyId, branchId: p.branchId, name: p.name }));
     },
     async details(cart: CartContext, productId: string) { return product(await invoke("silpo_get_product_details", { ...ctx(cart), productId }), cart, productId); },
     async substitutions(cart: CartContext, productId: string) {
-      const data = z.object({ products: z.array(WireProductSchema).max(300) }).strict().parse(await invoke("silpo_get_replacements", { ...ctx(cart), productId }));
+      const data = await invoke("silpo_get_replacements", { ...ctx(cart), productId });
       return data.products.map(p => ({ productId: p.productId, companyId: p.companyId, branchId: p.branchId, name: p.name }));
     },
-    async setQuantities(cart: CartContext, lines: CartLine[]) { await invoke("silpo_add_or_update_cart_products", { ...ctx(cart), products: lines.map(l => ({ productId: l.productId, companyId: l.companyId, branchId: l.branchId, quantity: l.quantity })) }, true); },
-    async remove(cart: CartContext, lines: CartLine[]) { await invoke("silpo_remove_cart_products", { ...ctx(cart), products: lines.map(l => ({ productId: l.productId, companyId: l.companyId, branchId: l.branchId })) }, true); },
+    async setQuantities(cart: CartSnapshot, lines: CartLine[]) { await invoke("silpo_add_or_update_cart_products", { ...ctx(cart), cartVersion: cart.cartVersion, products: lines.map(l => ({ productId: l.productId, companyId: l.companyId, branchId: l.branchId, quantity: l.quantity })) }, true); },
+    async remove(cart: CartSnapshot, lines: CartLine[]) { await invoke("silpo_remove_cart_products", { ...ctx(cart), cartVersion: cart.cartVersion, products: lines.map(l => ({ productId: l.productId, companyId: l.companyId, branchId: l.branchId })) }, true); },
   };
 }
 export type CommerceAdapter = ReturnType<typeof createMcpCommerceAdapter>;

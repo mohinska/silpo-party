@@ -23,14 +23,15 @@ select extensions.throws_ok($$select public.agent_v2_cart_acquire((select id fro
 create temporary table second_operation as select public.agent_v2_approve('10000000-0000-0000-0000-000000000011','00000000-0000-0000-0000-000000000011',1,'two') as id;
 select extensions.throws_ok($$select public.agent_v2_cart_acquire((select id from second_operation),'00000000-0000-0000-0000-000000000011','worker2','cart2')$$,'P0001','Cart writer already active','one active writer for party even another cart');
 select extensions.throws_ok($$select public.agent_v2_cart_prepare((select id from operations),'wrong','{}','{}','[]')$$,'P0001','Cart writer required','other worker cannot prepare');
-select public.agent_v2_cart_prepare((select id from operations),'worker','{"cartId":"cart"}','{"snapshot":{"cartId":"cart"},"managed":[]}','[]');
+select extensions.throws_ok($$select public.agent_v2_cart_prepare((select id from operations),'worker','{"cartId":"cart"}','{"snapshot":{"cartId":"cart"},"managed":[]}','[]')$$,'P0001','Conditional cartVersion required','cart plan without version is rejected');
+select public.agent_v2_cart_prepare((select id from operations),'worker','{"cartId":"cart","cartVersion":"v1"}','{"snapshot":{"cartId":"cart","cartVersion":"v1"},"managed":[]}','[]');
 select extensions.throws_ok($$select public.agent_v2_cart_prepare((select id from operations),'worker','{}','{}','[]')$$,'P0001','Cart plan is immutable','prepared intended writes immutable');
 update public.party_agent_workspaces set source_revision=2;
 select public.agent_v2_cart_finish((select id from operations),'worker','unknown',null,'timeout');
 select extensions.is((select status from public.party_cart_operations where id=(select id from operations)),'unknown','ambiguous state persisted');
 update public.party_agent_workspaces set processed_source_revision=2;
 select extensions.throws_ok($$select public.agent_v2_cart_acquire((select id from second_operation),'00000000-0000-0000-0000-000000000011','worker2','cart')$$,'P0001','Cart writer already active','unknown retains writer lock');
-select public.agent_v2_cart_finish((select id from operations),'worker','verified','{"cartId":"cart"}',null);
+select public.agent_v2_cart_finish((select id from operations),'worker','verified','{"cartId":"cart","cartVersion":"v2"}',null);
 select extensions.is((select readback->>'cartId' from public.party_cart_operations where id=(select id from operations)),'cart','readback persisted');
 select extensions.lives_ok($$select public.agent_v2_cart_acquire((select id from operations),'00000000-0000-0000-0000-000000000011','worker3','cart')$$,'verified duplicate returns without writer');
 select extensions.ok(not has_function_privilege('authenticated','public.agent_v2_cart_acquire(uuid,uuid,text,text)','execute'),'authority RPC is service-only');

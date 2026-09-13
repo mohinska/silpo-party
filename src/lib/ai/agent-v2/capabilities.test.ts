@@ -8,7 +8,7 @@ import { createMcpCommerceAdapter, supportedContractFixture, CommerceError, retr
 
 const generated = { id: "recipe1", title: "Rice", origin: "generated", servings: 2, ingredients: [{ name: "Rice", quantity: 200, unit: "g", requiredAttributes: { color: "white" } }], steps: ["Boil rice."] };
 const product = { productId: "rice", companyId: "co", branchId: "branch", name: "White rice", packageQuantity: 500, packageUnit: "g", priceCents: 100, available: true, stockPackages: 10, ingredients: ["rice"], composition: "rice", compositionComplete: true, attributes: { color: "white" } };
-const snapshot = { cartId: "cart", companyId: "co", branchId: "branch", deliveryType: "SelfPickup", timeslotStart: "2026-09-14T10:00:00Z", timeslotEnd: "2026-09-14T11:00:00Z", lines: [], totalCents: 0, validationErrors: [] };
+const snapshot = { cartId: "cart", cartVersion: "v1", companyId: "co", branchId: "branch", deliveryType: "SelfPickup", timeslotStart: "2026-09-14T10:00:00Z", timeslotEnd: "2026-09-14T11:00:00Z", lines: [], totalCents: 0, validationErrors: [] };
 function adapter(overrides: Record<string, unknown> = {}) {
   const calls: { name: string; arguments: Record<string, unknown> }[] = [];
   const outputs: Record<string, unknown> = { silpo_get_my_shopping_cart: { exists: true, shoppingCartId: "cart" }, silpo_get_shopping_cart_by_id: snapshot, silpo_get_time_slots: { slots: [{ start: snapshot.timeslotStart, end: snapshot.timeslotEnd, available: true }] }, silpo_find_products_batch: { products: [product] }, silpo_get_product_details: product, ...overrides };
@@ -40,6 +40,20 @@ describe("complete recipe evidence", () => {
     expect(next.artifacts[0]).toEqual(first.artifacts[0]);
     expect(next.requirements[0].quantity).toBe(400);
   });
+  it("rejects an unverified source object at the derivation boundary", () => {
+    const w = applyRequestEdit(createWorkspace("party", ["host"]), "host", { kind: "add", requestId: "r", text: "rice", requestKind: "dish", servings: 2 });
+    const forged = { id: "source:claimed", title: "Rice", origin: "source" as const, sourceUrl: "https://example.com/rice", servings: 2, ingredients: [{ name: "Rice", quantity: 200, unit: "g" as const, requiredAttributes: {} }], steps: ["Boil rice."] };
+    expect(() => deriveRecipeRequirements(w, "r", forged as never)).toThrow(/verified|resolved/i);
+  });
+  it("content-addresses recipe evidence so changed content invalidates a reused supplied id", () => {
+    let w = applyRequestEdit(createWorkspace("party", ["host"]), "host", { kind: "add", requestId: "r", text: "rice", requestKind: "dish", servings: 2 });
+    const first = deriveRecipeRequirements(w, "r", validateGeneratedRecipe(generated));
+    w = { ...w, artifacts: first.artifacts, evidence: first.evidence };
+    const changed = validateGeneratedRecipe({ ...generated, ingredients: [{ ...generated.ingredients[0], quantity: 250 }] });
+    const next = deriveRecipeRequirements(w, "r", changed);
+    expect(next.evidence[0].id).not.toBe(first.evidence[0].id);
+    expect(next.artifacts[0].version).toBe(first.artifacts[0].version + 1);
+  });
 });
 
 describe("bounded public source fetching", () => {
@@ -62,10 +76,20 @@ describe("explicit MCP capabilities", () => {
     tools[0].inputSchema = { type: "object", properties: { guess: { type: "string" } } };
     expect(() => createMcpCommerceAdapter(tools, async () => ({}))).toThrow(/contract/i);
   });
+  it("blocks output-schema drift before making calls", () => {
+    const tools = structuredClone(supportedContractFixture.tools);
+    tools[0].outputSchema = { type: "object", properties: { guessed: { type: "string" } } };
+    expect(() => createMcpCommerceAdapter(tools, async () => ({}))).toThrow(/contract/i);
+  });
   it("validates selected slot after active cart and details", async () => {
     const { api, calls } = adapter({ silpo_get_time_slots: { slots: [{ start: "2026-09-14T12:00:00Z", end: "2026-09-14T13:00:00Z", available: true }] } });
     await expect(api.cart()).rejects.toThrow(/slot/i);
     expect(calls.map(c => c.name)).toEqual(["silpo_get_my_shopping_cart", "silpo_get_shopping_cart_by_id", "silpo_get_time_slots"]);
+  });
+  it("fails closed when a cart response lacks the conditional cart version", async () => {
+    const withoutVersion = Object.fromEntries(Object.entries(snapshot).filter(([key]) => key !== "cartVersion"));
+    const { api } = adapter({ silpo_get_shopping_cart_by_id: withoutVersion });
+    await expect(api.cart()).rejects.toThrow(/cartVersion|version/i);
   });
   it("bounds batches and binds product evidence to identity and retrieval time", async () => {
     const { api, calls } = adapter();

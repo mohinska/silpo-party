@@ -12,8 +12,23 @@ export type CommerceRequirement = z.infer<typeof CommerceRequirementSchema>;
 const RecipeFields = { id: text, title: text, servings: z.number().positive().max(10000), ingredients: z.array(z.object({ name: text, quantity: z.number().positive(), unit: UnitSchema, requiredAttributes: z.record(z.string(), text).default({}) }).strict()).min(1).max(100), steps: z.array(text).min(1).max(100) };
 export const CompleteRecipeSchema = z.discriminatedUnion("origin", [z.object({ ...RecipeFields, origin: z.literal("generated") }).strict(), z.object({ ...RecipeFields, origin: z.literal("source"), sourceUrl: z.url() }).strict()]);
 export type CompleteRecipe = z.infer<typeof CompleteRecipeSchema>;
-export function validateGeneratedRecipe(input: unknown): CompleteRecipe {
-  return CompleteRecipeSchema.options[0].parse(input);
+const resolvedRecipe = Symbol("resolved-recipe");
+export type ResolvedRecipe = CompleteRecipe & { readonly [resolvedRecipe]: true };
+function markResolved(recipe: CompleteRecipe): ResolvedRecipe {
+  Object.defineProperty(recipe, resolvedRecipe, { value: true });
+  return recipe as ResolvedRecipe;
+}
+function verifiedRecipe(recipe: ResolvedRecipe): CompleteRecipe {
+  if (!recipe || typeof recipe !== "object" || recipe[resolvedRecipe] !== true) throw new Error("Verified resolved recipe required");
+  return CompleteRecipeSchema.parse(recipe);
+}
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value && typeof value === "object") return `{${Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`).join(",")}}`;
+  return JSON.stringify(value);
+}
+export function validateGeneratedRecipe(input: unknown): ResolvedRecipe {
+  return markResolved(CompleteRecipeSchema.options[0].parse(input));
 }
 export function deriveProductRequirement(workspace: Workspace, requestId: string, requiredAttributes: Record<string, string> = {}): CommerceRequirement {
   const request = workspace.requests.find(r => r.id === requestId);
@@ -22,7 +37,7 @@ export function deriveProductRequirement(workspace: Workspace, requestId: string
 }
 
 /** The old parser's unit/quantity grammar is reused; dropping ingredients is forbidden. */
-export function parseSourceRecipe(html: string, url: string): CompleteRecipe {
+export function parseSourceRecipe(html: string, url: string): ResolvedRecipe {
   let source: Record<string, unknown> | undefined;
   const visit = (node: unknown, depth = 0): void => {
     if (depth > 20 || source || !node || typeof node !== "object") return;
@@ -54,20 +69,20 @@ export function parseSourceRecipe(html: string, url: string): CompleteRecipe {
   instruction(record.recipeInstructions);
   const yieldText = String(Array.isArray(record.recipeYield) ? record.recipeYield[0] : record.recipeYield);
   const servings = /^\s*(\d+(?:\.\d+)?)(?:\s+(?:servings?|portions?|порц\S*))?\s*$/iu.exec(yieldText)?.[1];
-  return CompleteRecipeSchema.parse({ id: `source:${createHash("sha256").update(url + html).digest("hex").slice(0, 24)}`, origin: "source", sourceUrl: url, title: record.name, servings: Number(servings), ingredients: ingredients.map(item => ({ name: item!.name, quantity: item!.quantity, unit: item!.unit, requiredAttributes: {} })), steps });
+  return markResolved(CompleteRecipeSchema.parse({ id: `source:${createHash("sha256").update(url + html).digest("hex").slice(0, 24)}`, origin: "source", sourceUrl: url, title: record.name, servings: Number(servings), ingredients: ingredients.map(item => ({ name: item!.name, quantity: item!.quantity, unit: item!.unit, requiredAttributes: {} })), steps }));
 }
 export async function resolveRecipeSource(url: string, signal?: AbortSignal) {
   const page = await fetchRecipePage(url, { signal });
   return parseSourceRecipe(page.body, page.url);
 }
 
-export function deriveRecipeRequirements(workspace: Workspace, requestId: string, input: CompleteRecipe) {
-  const recipe = CompleteRecipeSchema.parse(input);
+export function deriveRecipeRequirements(workspace: Workspace, requestId: string, input: ResolvedRecipe) {
+  const recipe = verifiedRecipe(input);
   const request = workspace.requests.find(r => r.id === requestId);
   if (!request || request.kind === "product") throw new Error("Recipe request required");
   const roots = requestDependencyKeys(requestId);
   const recipeArtifactId = `recipe:${requestId}`;
-  const evidence: Evidence = { id: `evidence:${recipe.id}`, source: recipe.origin === "generated" ? "generated_recipe" : "recipe_source", sourceRef: recipe.id, complete: true, verified: true, ingredients: recipe.ingredients.map(i => i.name), composition: recipe.ingredients.map(i => i.name).join(", ") };
+  const evidence: Evidence = { id: `evidence:${createHash("sha256").update(canonical(recipe)).digest("hex")}`, source: recipe.origin === "generated" ? "generated_recipe" : "recipe_source", sourceRef: recipe.id, complete: true, verified: true, ingredients: recipe.ingredients.map(i => i.name), composition: recipe.ingredients.map(i => i.name).join(", ") };
   const requirements = recipe.ingredients.map((ingredient, index) => CommerceRequirementSchema.parse({ id: `requirement:${requestId}:${index}`, requestId, name: ingredient.name, quantity: ingredient.quantity * request.servings / recipe.servings, unit: ingredient.unit, eaterIds: request.eaterIds, evidenceRefs: [evidence.id], requiredAttributes: ingredient.requiredAttributes }));
   const priorRecipe = workspace.artifacts.find(a => a.id === recipeArtifactId);
   const recipeArtifact: Artifact = priorRecipe?.valid && priorRecipe.evidenceRefs.length === 1 && priorRecipe.evidenceRefs[0] === evidence.id
