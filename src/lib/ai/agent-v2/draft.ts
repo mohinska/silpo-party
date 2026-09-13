@@ -48,6 +48,10 @@ export function calculateDraft(workspace: Workspace, input: Requirement[], selec
     const selection = selections.find(s => s.requirementId === requirement.id);
     if (!selection) { blockers.push({ code: "missing", requirementId: requirement.id }); continue; }
     const product = DraftProductSchema.parse(selection.product);
+    const identity = product.evidence.productIdentity;
+    if (product.evidence.source !== "product_details" || !identity || identity.productId !== product.id || identity.companyId !== product.companyId || identity.branchId !== product.branchId) {
+      blockers.push({ code: "unknown", requirementId: requirement.id, privateReason: "Composition evidence does not identify the selected catalog product" }); continue;
+    }
     const safety = evaluateEvidence(rules, product.evidence);
     if (safety.status !== "safe") { blockers.push({ code: safety.status, requirementId: requirement.id, privateReason: safety.privateReason }); continue; }
     if (!product.available) { blockers.push({ code: "unavailable", requirementId: requirement.id }); continue; }

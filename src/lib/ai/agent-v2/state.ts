@@ -8,7 +8,8 @@ export const UnitSchema = z.enum(["g", "kg", "ml", "l", "piece", "tbsp", "tsp"])
  * ingredient spelling cannot establish allergy safety (synonyms/derivatives/cross-contact). */
 export const HardRuleSchema = z.object({ id, kind: z.enum(["exclude_term", "semantic"]), value: z.string().min(1), source: id, evidenceRef: id }).strict();
 export type HardRule = z.infer<typeof HardRuleSchema>;
-export const EvidenceSchema = z.object({ id, source: z.enum(["recipe_source", "generated_recipe", "product_details"]), sourceRef: id, complete: z.boolean(), ingredients: z.array(z.string().min(1)), composition: z.string(), verified: z.boolean() }).strict();
+export const ProductIdentitySchema = z.object({ productId: id, companyId: id, branchId: id }).strict();
+export const EvidenceSchema = z.object({ id, source: z.enum(["recipe_source", "generated_recipe", "product_details"]), sourceRef: id, productIdentity: ProductIdentitySchema.optional(), complete: z.boolean(), ingredients: z.array(z.string().min(1)), composition: z.string(), verified: z.boolean() }).strict();
 export type Evidence = z.infer<typeof EvidenceSchema>;
 const ContextSchema = z.object({ source: id, version: revision, status: z.enum(["success", "error"]), rules: z.array(HardRuleSchema), favorites: z.array(z.string()), evidenceRefs: z.array(id), errorCode: z.string().optional() }).strict();
 export type ParticipantContext = z.infer<typeof ContextSchema>;
@@ -49,6 +50,12 @@ export function invalidateArtifacts(artifacts: Artifact[], changedIds: string[])
   return artifacts.map(artifact => invalid.has(artifact.id) ? { ...artifact, valid: false } : artifact);
 }
 
+/** Recipe retrieval depends on source; scaled quantities on scaling; eater safety
+ * on eaters + context:<participantId>. Artifacts may depend on other artifact IDs. */
+export function requestDependencyKeys(requestId: string) {
+  return { source: `request:${requestId}:source`, scaling: `request:${requestId}:scaling`, eaters: `request:${requestId}:eaters` };
+}
+
 export function applyRequestEdit(workspace: Workspace, actorId: string, input: RequestEdit): Workspace {
   const edit = RequestEditSchema.parse(input);
   if (!workspace.participants[actorId]) throw new Error("Party membership required");
@@ -67,7 +74,11 @@ export function applyRequestEdit(workspace: Workspace, actorId: string, input: R
     replacement.version++;
   }
   if (replacement?.eaterIds.some(id => !workspace.participants[id])) throw new Error("Unknown eater");
-  return WorkspaceSchema.parse({ ...workspace, inputRevision: workspace.inputRevision + 1, participants: { ...workspace.participants, [actorId]: { ...workspace.participants[actorId], submission: "submitted" } }, requests: replacement ? [...workspace.requests.filter(r => r.id !== edit.requestId), replacement] : workspace.requests.filter(r => r.id !== edit.requestId), artifacts: invalidateArtifacts(workspace.artifacts, [`request:${edit.requestId}`]) });
+  const roots = requestDependencyKeys(edit.requestId);
+  const changedRoots = edit.kind === "servings" || edit.kind === "quantity" ? [roots.scaling]
+    : edit.kind === "eaters" ? [roots.eaters]
+    : [roots.source, roots.scaling, roots.eaters, `request:${edit.requestId}`];
+  return WorkspaceSchema.parse({ ...workspace, inputRevision: workspace.inputRevision + 1, participants: { ...workspace.participants, [actorId]: { ...workspace.participants[actorId], submission: "submitted" } }, requests: replacement ? [...workspace.requests.filter(r => r.id !== edit.requestId), replacement] : workspace.requests.filter(r => r.id !== edit.requestId), artifacts: invalidateArtifacts(workspace.artifacts, changedRoots) });
 }
 
 export function refreshContext(workspace: Workspace, participantId: string, refresh: ContextRefresh): Workspace {

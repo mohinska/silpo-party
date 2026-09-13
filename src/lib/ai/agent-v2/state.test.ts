@@ -5,6 +5,7 @@ import { evaluateEvidence, calculateDraft, publishDraft, projectDraft } from "./
 const add = { kind: "add" as const, requestId: "r1", text: "Rice", requestKind: "dish" as const };
 const rule = { id: "milk", kind: "exclude_term" as const, value: "milk", source: "profile", evidenceRef: "private-e1" };
 const evidence = { id: "e1", source: "product_details" as const, sourceRef: "product:123", complete: true, ingredients: ["rice"], composition: "rice", verified: true };
+const productEvidence = { ...evidence, productIdentity: { productId: "prod", companyId: "c", branchId: "b" } };
 
 describe("versioned private workspace", () => {
   it("defaults own request to own eater without assigning unsubmitted members", () => {
@@ -37,6 +38,21 @@ describe("versioned private workspace", () => {
     ];
     expect(invalidateArtifacts(artifacts, ["request:r1"]).map(a => a.valid)).toEqual([false, false, true]);
   });
+  it.each([
+    { kind: "servings" as const, requestId: "r1", servings: 2 },
+    { kind: "quantity" as const, requestId: "r1", quantity: 2, unit: "piece" as const },
+    { kind: "eaters" as const, requestId: "r1", eaterIds: ["a", "b"] },
+  ])("preserves recipe source for $kind while invalidating dependent calculations", edit => {
+    const state = applyRequestEdit(createWorkspace("p", ["a", "b"]), "a", add);
+    state.artifacts = [
+      { id: "recipe", kind: "recipe", version: 1, valid: true, dependsOn: ["request:r1:source"], evidenceRefs: [] },
+      { id: "scaled", kind: "requirement", version: 1, valid: true, dependsOn: ["recipe", "request:r1:scaling", "request:r1:eaters"], evidenceRefs: [] },
+      { id: "products", kind: "product", version: 1, valid: true, dependsOn: ["scaled"], evidenceRefs: [] },
+      { id: "other", kind: "recipe", version: 1, valid: true, dependsOn: ["request:r2:source"], evidenceRefs: [] },
+    ];
+    expect(applyRequestEdit(state, "a", edit).artifacts.map(a => a.valid)).toEqual([true, false, false, true]);
+    expect(applyRequestEdit(state, "a", { kind: "replace", requestId: "r1", text: "Pasta", requestKind: "dish" }).artifacts.map(a => a.valid)).toEqual([false, false, false, true]);
+  });
   it("unions participant source rules and retains known constraints on refresh error", () => {
     let state = createWorkspace("p", ["a"]);
     state = refreshContext(state, "a", { source: "profile", version: 1, status: "success", rules: [rule], favorites: [], evidenceRefs: ["private-e1"] });
@@ -64,11 +80,35 @@ describe("evidence and deterministic readiness", () => {
   it("does not call incomplete composition safe even with no known rules", () => {
     expect(evaluateEvidence([], { ...evidence, complete: false }).status).toBe("unknown");
   });
+  it("blocks recipe evidence reused as product composition", () => {
+    const state = applyRequestEdit(createWorkspace("p", ["a"]), "a", { ...add, requestKind: "product" });
+    const requirements = [{ id: "i1", requestId: "r1", name: "Milk", quantity: 1, unit: "g" as const, eaterIds: ["a"], evidenceRefs: ["e1"] }];
+    const product = { id: "milk", name: "Milk", companyId: "c", branchId: "b", packageQuantity: 500, packageUnit: "g" as const, priceCents: 1000, available: true, evidence: { ...evidence, source: "recipe_source" as const } };
+    expect(calculateDraft(state, requirements, [{ requirementId: "i1", product }], null).ready).toBe(false);
+  });
+  it("blocks product details without identity proof", () => {
+    const state = applyRequestEdit(createWorkspace("p", ["a"]), "a", { ...add, requestKind: "product" });
+    const requirements = [{ id: "i1", requestId: "r1", name: "Milk", quantity: 1, unit: "g" as const, eaterIds: ["a"], evidenceRefs: ["e1"] }];
+    const product = { id: "milk", name: "Milk", companyId: "c", branchId: "b", packageQuantity: 500, packageUnit: "g" as const, priceCents: 1000, available: true, evidence };
+    expect(calculateDraft(state, requirements, [{ requirementId: "i1", product }], null).ready).toBe(false);
+  });
+  it.each([
+    { productId: "wrong", companyId: "c", branchId: "b" },
+    { productId: "prod", companyId: "wrong", branchId: "b" },
+    { productId: "prod", companyId: "c", branchId: "wrong" },
+  ])("blocks composition for a different catalog identity: $productId/$companyId/$branchId", productIdentity => {
+    const state = applyRequestEdit(createWorkspace("p", ["a"]), "a", { ...add, requestKind: "product" });
+    const requirements = [{ id: "i1", requestId: "r1", name: "Rice", quantity: 1, unit: "g" as const, eaterIds: ["a"], evidenceRefs: ["e1"] }];
+    const product = { id: "prod", name: "Rice", companyId: "c", branchId: "b", packageQuantity: 500, packageUnit: "g" as const, priceCents: 1000, available: true, evidence: { ...evidence, productIdentity } };
+    const draft = calculateDraft(state, requirements, [{ requirementId: "i1", product }], null);
+    expect(draft.ready).toBe(false);
+    expect(draft.blockers).toMatchObject([{ code: "unknown", requirementId: "i1" }]);
+  });
   it("rounds packages after aggregation and blocks missing required ingredients", () => {
     const state = applyRequestEdit(createWorkspace("p", ["a"]), "a", add);
     state.evidence = [{ ...evidence, source: "recipe_source" }];
     const requirements = [{ id: "i1", requestId: "r1", name: "Rice", quantity: 0.6, unit: "kg" as const, eaterIds: ["a"], evidenceRefs: ["e1"] }];
-    const product = { id: "prod", name: "Rice", companyId: "c", branchId: "b", packageQuantity: 500, packageUnit: "g" as const, priceCents: 1000, available: true, evidence };
+    const product = { id: "prod", name: "Rice", companyId: "c", branchId: "b", packageQuantity: 500, packageUnit: "g" as const, priceCents: 1000, available: true, evidence: productEvidence };
     const draft = calculateDraft(state, requirements, [{ requirementId: "i1", product }], null);
     expect(draft.lines[0]).toMatchObject({ packageCount: 2, lineTotalCents: 2000 });
     expect(draft.totalCents).toBe(2000);
@@ -81,14 +121,14 @@ describe("evidence and deterministic readiness", () => {
     let state = applyRequestEdit(createWorkspace("p", ["a"]), "a", add);
     state = refreshContext(state, "a", { source: "profile", version: 1, status: "success", rules: [rule], favorites: [], evidenceRefs: ["private-e1"] });
     const requirement = { id: "i1", requestId: "r1", name: "Rice", quantity: 1, unit: "g" as const, eaterIds: ["a"], evidenceRefs: ["recipe-e1"] };
-    const product = { id: "prod", name: "Rice", companyId: "c", branchId: "b", packageQuantity: 500, packageUnit: "g" as const, priceCents: 1000, available: true, evidence };
+    const product = { id: "prod", name: "Rice", companyId: "c", branchId: "b", packageQuantity: 500, packageUnit: "g" as const, priceCents: 1000, available: true, evidence: productEvidence };
     expect(calculateDraft(state, [requirement], [{ requirementId: "i1", product }], null).ready).toBe(false);
     state.evidence = [{ ...evidence, id: "recipe-e1", source: "recipe_source", ingredients: ["rice", "milk"], composition: "rice, milk" }];
     expect(calculateDraft(state, [requirement], [{ requirementId: "i1", product }], null).blockers[0].code).toBe("unsafe");
   });
   it("never rounds a positive requirement down across a package boundary", () => {
     const state = applyRequestEdit(createWorkspace("p", ["a"]), "a", { ...add, requestKind: "product" });
-    const product = { id: "prod", name: "Rice", companyId: "c", branchId: "b", packageQuantity: 500, packageUnit: "g" as const, priceCents: 1000, available: true, evidence };
+    const product = { id: "prod", name: "Rice", companyId: "c", branchId: "b", packageQuantity: 500, packageUnit: "g" as const, priceCents: 1000, available: true, evidence: productEvidence };
     const requirements = [{ id: "i1", requestId: "r1", name: "Rice", quantity: 500.0001, unit: "g" as const, eaterIds: ["a"], evidenceRefs: ["e1"] }];
     expect(calculateDraft(state, requirements, [{ requirementId: "i1", product }], null).lines[0].packageCount).toBe(2);
   });

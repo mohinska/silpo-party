@@ -12,7 +12,7 @@ export const SourceEventKindSchema = z.enum(["chat", "request_edit", "context_re
 export type SourceEventKind = z.infer<typeof SourceEventKindSchema>;
 export const ActivityCodeSchema = z.enum(["queued", "working", "draft_updated", "waiting_for_input", "blocked", "completed", "failed", "cancelled", "superseded"]);
 export type ActivityCode = z.infer<typeof ActivityCodeSchema>;
-const ClaimSchema = z.object({ job_id: uuid, party_id: uuid, event_id: uuid, fence: counter, input_revision: counter, draft_revision: counter, step_sequence: counter, workspace: WorkspaceSchema, checkpoint: z.record(z.string(), z.unknown()) });
+const ClaimSchema = z.object({ job_id: uuid, party_id: uuid, event_id: uuid, fence: counter, input_revision: counter, draft_revision: counter, source_revision: counter, processed_source_revision: counter, step_sequence: counter, workspace: WorkspaceSchema, checkpoint: z.record(z.string(), z.unknown()) });
 export type ClaimedWork = z.infer<typeof ClaimSchema>;
 export type RpcTransport = (name: string, args: Record<string, unknown>) => PromiseLike<{ data: unknown; error: { message: string; code?: string } | null }>;
 export class RepositoryError extends Error {
@@ -44,9 +44,9 @@ export function createAgentV2Repository(transport?: RpcTransport) {
       const data = await call("agent_v2_claim", { p_worker_id: z.string().trim().min(1).parse(workerId), p_lease_seconds: z.number().int().min(1).max(60).parse(leaseSeconds) });
       return z.array(ClaimSchema).max(1).parse(data)[0] ?? null;
     },
-    async checkpoint(input: { jobId: string; workerId: string; fence: number; expectedInputRevision: number; expectedDraftRevision: number; stepSequence: number; workspace: Workspace; messages: unknown[]; checkpoint: Record<string, unknown>; publish?: boolean; activityCode?: ActivityCode }) {
+    async checkpoint(input: { jobId: string; workerId: string; fence: number; expectedInputRevision: number; expectedDraftRevision: number; expectedSourceRevision: number; eventProcessed?: boolean; stepSequence: number; workspace: Workspace; messages: unknown[]; checkpoint: Record<string, unknown>; publish?: boolean; activityCode?: ActivityCode }) {
       const workspace = WorkspaceSchema.parse(input.workspace);
-      await call("agent_v2_checkpoint", { p_job_id: uuid.parse(input.jobId), p_worker_id: z.string().min(1).parse(input.workerId), p_fence: counter.parse(input.fence), p_expected_input: counter.parse(input.expectedInputRevision), p_expected_draft: counter.parse(input.expectedDraftRevision), p_step: counter.parse(input.stepSequence), p_workspace: workspace, p_messages: z.array(z.unknown()).parse(input.messages), p_checkpoint: input.checkpoint, p_projection: input.publish ? projectDraft(workspace) : null, p_activity_code: input.activityCode ? ActivityCodeSchema.parse(input.activityCode) : null });
+      await call("agent_v2_checkpoint", { p_job_id: uuid.parse(input.jobId), p_worker_id: z.string().min(1).parse(input.workerId), p_fence: counter.parse(input.fence), p_expected_input: counter.parse(input.expectedInputRevision), p_expected_draft: counter.parse(input.expectedDraftRevision), p_expected_source: counter.parse(input.expectedSourceRevision), p_event_processed: input.eventProcessed ?? false, p_step: counter.parse(input.stepSequence), p_workspace: workspace, p_messages: z.array(z.unknown()).parse(input.messages), p_checkpoint: input.checkpoint, p_projection: input.publish ? projectDraft(workspace) : null, p_activity_code: input.activityCode ? ActivityCodeSchema.parse(input.activityCode) : null });
     },
     async acknowledge(input: { jobId: string; workerId: string; fence: number; stepSequence: number; status: Exclude<RunStatus, "running"> }) {
       const status = RunStatusSchema.exclude(["running"]).parse(input.status);
@@ -64,7 +64,7 @@ export async function readAgentV2Workspace(partyId: string): Promise<Workspace |
   return data ? WorkspaceSchema.parse(data.workspace) : null;
 }
 
-export const SourceEventSchema = z.object({ id: uuid, party_id: uuid, actor_id: uuid, idempotency_key: z.string(), kind: SourceEventKindSchema, payload: z.record(z.string(), z.unknown()), input_revision: counter, created_at: z.string() });
+export const SourceEventSchema = z.object({ id: uuid, party_id: uuid, actor_id: uuid, idempotency_key: z.string(), kind: SourceEventKindSchema, payload: z.record(z.string(), z.unknown()), input_revision: counter, source_sequence: counter, created_at: z.string() });
 export type SourceEvent = z.infer<typeof SourceEventSchema>;
 export async function readAgentV2Event(eventId: string): Promise<SourceEvent> {
   const { data, error } = await createAdminClient().from("party_agent_events").select("*").eq("id", uuid.parse(eventId)).single();

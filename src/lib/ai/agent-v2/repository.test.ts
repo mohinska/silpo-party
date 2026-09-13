@@ -22,8 +22,8 @@ describe("agent v2 repository boundary", () => {
     const repo = createAgentV2Repository(async (_name, parameters) => { args = parameters; return { data: null, error: null }; });
     const workspace = createWorkspace(partyId, [actorId]);
     const next = publishDraft(workspace, calculateDraft(workspace, [], [], null), 0, 0);
-    await repo.checkpoint({ jobId: "20000000-0000-4000-8000-000000000001", workerId: "w", fence: 7, expectedInputRevision: 0, expectedDraftRevision: 0, stepSequence: 1, workspace: next, messages: [], checkpoint: { phase: "planning", privateReason: "secret" }, publish: true });
-    expect(args).toMatchObject({ p_fence: 7, p_expected_input: 0, p_expected_draft: 0, p_step: 1 });
+    await repo.checkpoint({ jobId: "20000000-0000-4000-8000-000000000001", workerId: "w", fence: 7, expectedInputRevision: 0, expectedDraftRevision: 0, expectedSourceRevision: 3, eventProcessed: true, stepSequence: 1, workspace: next, messages: [], checkpoint: { phase: "planning", privateReason: "secret" }, publish: true });
+    expect(args).toMatchObject({ p_fence: 7, p_expected_input: 0, p_expected_draft: 0, p_expected_source: 3, p_event_processed: true, p_step: 1 });
     expect(JSON.stringify(args.p_projection)).not.toContain("secret");
     expect(args.p_projection).toMatchObject({ draftRevision: 1, ready: false });
   });
