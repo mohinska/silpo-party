@@ -2,17 +2,32 @@ import { z } from "zod";
 import { normalizeIngredient } from "../planning/meal-proposal";
 import { DraftSchema, EvidenceSchema, UnitSchema, effectiveRules, type Draft, type Evidence, type HardRule, type Workspace } from "./state";
 
-export type SafetyResult = { status: "safe" | "unsafe" | "unknown"; evidenceRefs: string[]; privateReason?: string };
+export type SafetyResult =
+  | { status: "safe"; evidenceRefs: string[] }
+  | { status: "unsafe" | "unknown"; evidenceRefs: string[]; privateReason: string }
+  // A semantic (allergy/diet) restriction can't be confirmed or ruled out from
+  // literal text -- that's a real limit, not a data gap. Warn the declaring
+  // participant privately instead of blocking the whole draft for everyone.
+  | { status: "warn"; evidenceRefs: string[]; privateReason: string; recipientIds: string[] };
 const canonical = (value: string) => value.normalize("NFKC").toLocaleLowerCase("uk-UA").trim();
 
-/** Only explicit literal exclusions are supported. Semantic rules require a future verified ontology. */
+/** Literal exclusions and missing/incomplete data are real blockers for
+ * everyone. A semantic restriction with a known owner becomes a private
+ * warning to that owner only, never a block on the shared draft. */
 export function evaluateEvidence(rules: HardRule[], input: Evidence): SafetyResult {
   const evidence = EvidenceSchema.parse(input);
   const text = canonical([...evidence.ingredients, evidence.composition].join(" "));
   const refs = [evidence.id];
   if (rules.some(rule => rule.kind === "exclude_term" && text.includes(canonical(rule.value)))) return { status: "unsafe", evidenceRefs: refs, privateReason: "Declared excluded ingredient appears in source evidence" };
   if (!evidence.verified || !evidence.complete || !evidence.ingredients.length || !evidence.composition.trim()) return { status: "unknown", evidenceRefs: refs, privateReason: "Complete verified composition is unavailable" };
-  if (rules.some(rule => rule.kind === "semantic")) return { status: "unknown", evidenceRefs: refs, privateReason: "Semantic restriction is not supported by deterministic evidence validation" };
+  const semanticRules = rules.filter(rule => rule.kind === "semantic");
+  if (semanticRules.length) {
+    const recipientIds = [...new Set(semanticRules.map(rule => rule.ownerId).filter((id): id is string => Boolean(id)))];
+    if (recipientIds.length) return { status: "warn", evidenceRefs: refs, privateReason: "Semantic restriction is not supported by deterministic evidence validation", recipientIds };
+    // Pre-migration rule with no recorded owner: fail closed until that
+    // participant's context is refreshed again and gains an ownerId.
+    return { status: "unknown", evidenceRefs: refs, privateReason: "Semantic restriction owner is unknown" };
+  }
   return { status: "safe", evidenceRefs: refs };
 }
 
@@ -29,6 +44,10 @@ export function calculateDraft(workspace: Workspace, input: Requirement[], selec
   if (new Set(selections.map(s => s.requirementId)).size !== selections.length) throw new Error("Duplicate selection");
   if (budgetCents !== null && (!Number.isSafeInteger(budgetCents) || budgetCents < 0)) throw new Error("Invalid budget");
   const blockers: Draft["blockers"] = [];
+  const warnings: Draft["warnings"] = [];
+  const warn = (requirement: Requirement, safety: Extract<SafetyResult, { status: "warn" }>) => {
+    for (const recipientId of safety.recipientIds) warnings.push({ code: "dietary_unverified", requirementId: requirement.id, requirementName: requirement.name, recipientId, privateReason: safety.privateReason });
+  };
   const groups = new Map<string, { product: DraftProduct; quantity: number; requirementIds: string[]; eaterIds: string[] }>();
   if (!requirements.length) blockers.push({ code: "empty" });
   for (const request of workspace.requests) if (!requirements.some(r => r.requestId === request.id)) blockers.push({ code: "missing", privateReason: "Request has no complete requirements" });
@@ -40,9 +59,11 @@ export function calculateDraft(workspace: Workspace, input: Requirement[], selec
       const sourceEvidence = requirement.evidenceRefs.map(ref => workspace.evidence.find(e => e.id === ref));
       const sourceSafety = sourceEvidence.map(e => e && e.source !== "product_details" ? evaluateEvidence(rules, e) : { status: "unknown" as const });
       const unsafe = sourceSafety.some(s => s.status === "unsafe");
-      if (unsafe || sourceSafety.some(s => s.status === "unknown")) {
+      const unknown = sourceSafety.some(s => s.status === "unknown");
+      if (unsafe || unknown) {
         blockers.push({ code: unsafe ? "unsafe" : "unknown", requirementId: requirement.id, privateReason: "Recipe ingredient evidence is unsafe or incomplete" }); continue;
       }
+      for (const s of sourceSafety) if (s.status === "warn") warn(requirement, s);
     }
     if (workspace.artifacts.some(a => !a.valid && (a.id === requirement.id || a.evidenceRefs.some(ref => requirement.evidenceRefs.includes(ref))))) { blockers.push({ code: "unknown", requirementId: requirement.id, privateReason: "Dependency requires refresh" }); continue; }
     const selection = selections.find(s => s.requirementId === requirement.id);
@@ -53,7 +74,8 @@ export function calculateDraft(workspace: Workspace, input: Requirement[], selec
       blockers.push({ code: "unknown", requirementId: requirement.id, privateReason: "Composition evidence does not identify the selected catalog product" }); continue;
     }
     const safety = evaluateEvidence(rules, product.evidence);
-    if (safety.status !== "safe") { blockers.push({ code: safety.status, requirementId: requirement.id, privateReason: safety.privateReason }); continue; }
+    if (safety.status === "unsafe" || safety.status === "unknown") { blockers.push({ code: safety.status, requirementId: requirement.id, privateReason: safety.privateReason }); continue; }
+    if (safety.status === "warn") warn(requirement, safety);
     if (!product.available) { blockers.push({ code: "unavailable", requirementId: requirement.id }); continue; }
     // Reuse the established unit mapping, but preserve required precision: the
     // legacy normalizer rounds quantities to milligrams and can underbuy a pack.
@@ -71,7 +93,8 @@ export function calculateDraft(workspace: Workspace, input: Requirement[], selec
   }).sort((a, b) => `${a.productId}:${a.companyId}:${a.branchId}`.localeCompare(`${b.productId}:${b.companyId}:${b.branchId}`));
   const totalCents = lines.reduce((sum, line) => sum + line.lineTotalCents, 0);
   if (budgetCents !== null && totalCents > budgetCents) blockers.push({ code: "budget" });
-  return DraftSchema.parse({ inputRevision: workspace.inputRevision, lines, totalCents, ready: blockers.length === 0, blockers });
+  const dedupedWarnings = [...new Map(warnings.map(w => [`${w.code}:${w.requirementId ?? ""}:${w.recipientId}`, w])).values()];
+  return DraftSchema.parse({ inputRevision: workspace.inputRevision, lines, totalCents, ready: blockers.length === 0, blockers, warnings: dedupedWarnings });
 }
 
 export function publishDraft(workspace: Workspace, input: Draft, expectedInputRevision: number, expectedDraftRevision: number): Workspace {
@@ -81,7 +104,10 @@ export function publishDraft(workspace: Workspace, input: Draft, expectedInputRe
   return { ...workspace, draftRevision: workspace.draftRevision + 1, draft };
 }
 
-/** Explicit allowlist: never spread workspace, context, evidence, outcomes or private blockers. */
+/** Explicit allowlist: never spread workspace, context, evidence, outcomes or
+ * private blockers. draft.warnings is deliberately never included here --
+ * each warning names its own recipient and must only reach them, via a
+ * private notice, never this shared projection. */
 export function projectDraft(workspace: Workspace) {
   return { schemaVersion: 2 as const, partyId: workspace.partyId, inputRevision: workspace.inputRevision, draftRevision: workspace.draftRevision, ready: Boolean(workspace.draft?.ready && workspace.draft.inputRevision === workspace.inputRevision), lines: workspace.draft?.lines.map(line => ({ productId: line.productId, name: line.name, companyId: line.companyId, branchId: line.branchId, packageCount: line.packageCount, packageQuantity: line.packageQuantity, packageUnit: line.packageUnit, unitPriceCents: line.unitPriceCents, lineTotalCents: line.lineTotalCents, eaterIds: [...line.eaterIds] })) ?? [], totalCents: workspace.draft?.totalCents ?? 0, unresolvedCount: workspace.draft?.blockers.length ?? 0, blockerCodes: [...new Set(workspace.draft?.blockers.map(b => b.code) ?? [])] };
 }

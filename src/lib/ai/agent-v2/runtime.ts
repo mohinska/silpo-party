@@ -22,6 +22,7 @@ const CheckpointSchema = z.object({
   nextAttemptAt: z.string().datetime({ offset: true }).nullable(), commerce: CommerceStateSchema, candidateDraft: z.unknown().nullable(),
   resumeMessageIds: z.array(z.string().min(1)).max(100).default([]),
   appliedEventIds: z.array(z.string().min(1)).max(100).default([]),
+  notifiedWarnings: z.array(z.string().min(1)).max(200).default([]),
   openQuestions: z.array(z.object({ id: z.string(), taskId: z.string(), recipientId: z.string(), sourceEventId: z.string() }).strict()), lastProgressFingerprint: z.string(),
   lastStep: z.object({ finishReason: z.string(), usage: z.unknown(), response: z.unknown(), providerMetadata: z.unknown(), evidenceIds: z.array(z.string()), outcome: OutcomeSchema }).nullable(),
 }).strict();
@@ -32,10 +33,18 @@ type ContextLoader = (partyId: string, participantId: string, source: "profile" 
 type CommerceScope = <T>(operation: (commerce: CommerceReadAdapter) => Promise<T>) => Promise<T>;
 export type AgentV2RuntimeDependencies = { commerce?: CommerceReadAdapter; withCommerce?: CommerceScope; loadContext?: ContextLoader; resolveRecipe?: typeof resolveRecipeSource; now?: () => Date; };
 export type ExecuteAgentV2SliceInput = AgentV2RuntimeDependencies & { model: LanguageModel | null; event: RuntimeEvent; workspace: Workspace; checkpoint: unknown; messages: ModelMessage[]; budgetCents: number | null; abortSignal?: AbortSignal };
-export type ExecuteAgentV2SliceResult = { workspace: Workspace; checkpoint: AgentV2Checkpoint; messages: ModelMessage[]; status: "queued" | "completed" | "waiting_for_input" | "blocked"; publish: boolean; eventProcessed: boolean; activityCode: "working" | "completed" | "waiting_for_input" | "blocked"; question: { id: string; recipientId: string; content: string } | null };
+type PrivateNotice = { id: string; recipientId: string; content: string };
+export type ExecuteAgentV2SliceResult = { workspace: Workspace; checkpoint: AgentV2Checkpoint; messages: ModelMessage[]; status: "queued" | "completed" | "waiting_for_input" | "blocked"; publish: boolean; eventProcessed: boolean; activityCode: "working" | "completed" | "waiting_for_input" | "blocked"; question: { id: string; recipientId: string; content: string } | null; notices: PrivateNotice[] };
 
 function initialCheckpoint(event: RuntimeEvent): AgentV2Checkpoint {
-  return { schemaVersion: 1, logicalRunId: randomUUID(), activeEventId: event.id, modelSteps: 0, noProgressSteps: 0, transientAttempts: {}, nextAttemptAt: null, commerce: createCommerceState(), candidateDraft: null, resumeMessageIds: [], appliedEventIds: [], openQuestions: [], lastProgressFingerprint: "", lastStep: null };
+  return { schemaVersion: 1, logicalRunId: randomUUID(), activeEventId: event.id, modelSteps: 0, noProgressSteps: 0, transientAttempts: {}, nextAttemptAt: null, commerce: createCommerceState(), candidateDraft: null, resumeMessageIds: [], appliedEventIds: [], notifiedWarnings: [], openQuestions: [], lastProgressFingerprint: "", lastStep: null };
+}
+
+function warningKey(w: { code: string; requirementId?: string; recipientId: string }) {
+  return `${w.code}:${w.requirementId ?? ""}:${w.recipientId}`;
+}
+function warningMessage(w: { requirementName?: string }) {
+  return `Не вдалося гарантовано перевірити товар${w.requirementName ? ` для «${w.requirementName}»` : ""} на відповідність вашому задекларованому обмеженню (алергія/дієта). Перевірте склад самостійно перед підтвердженням кошика.`;
 }
 
 function parseCheckpoint(input: unknown, event: RuntimeEvent) {
@@ -93,6 +102,8 @@ export async function executeAgentV2Slice(input: ExecuteAgentV2SliceInput): Prom
   const observedOutcome = (): ToolOutcome => outcome;
   const questions = [...checkpoint.openQuestions];
   let privateQuestion: ExecuteAgentV2SliceResult["question"] = null;
+  const notices: PrivateNotice[] = [];
+  let notifiedWarnings = new Set(checkpoint.notifiedWarnings);
   let toolCallCount = 0;
   let eventCompletionRequested = false;
   if (!checkpoint.appliedEventIds.includes(input.event.id)) {
@@ -111,7 +122,7 @@ export async function executeAgentV2Slice(input: ExecuteAgentV2SliceInput): Prom
     } catch (error) {
       outcome = classified(error, checkpoint);
       checkpoint = { ...checkpoint, lastStep: { finishReason: "source_reducer_error", usage: {}, response: {}, providerMetadata: {}, evidenceIds: [], outcome } };
-      return { workspace: input.workspace, checkpoint, messages: input.messages, status: "blocked", publish: false, eventProcessed: false, activityCode: "blocked", question: null };
+      return { workspace: input.workspace, checkpoint, messages: input.messages, status: "blocked", publish: false, eventProcessed: false, activityCode: "blocked", question: null, notices: [] };
     }
   }
   const sourceAppliedWorkspace = structuredClone(workspace);
@@ -127,12 +138,12 @@ export async function executeAgentV2Slice(input: ExecuteAgentV2SliceInput): Prom
       nextAttemptAt: attempt < 3 ? new Date(now().getTime() + 5_000 * 2 ** (attempt - 1)).toISOString() : null,
       lastStep: { finishReason: "model_unavailable", usage: {}, response: {}, providerMetadata: {}, evidenceIds: [], outcome },
     };
-    return { workspace, checkpoint, messages: input.messages, status: "blocked", publish: false, eventProcessed: false, activityCode: "blocked", question: null };
+    return { workspace, checkpoint, messages: input.messages, status: "blocked", publish: false, eventProcessed: false, activityCode: "blocked", question: null, notices: [] };
   }
   if (checkpoint.modelSteps >= 20) {
     outcome = { status: "blocked", code: "limit", summary: "Logical model-step limit reached" };
     checkpoint = { ...checkpoint, lastStep: { finishReason: "limit", usage: {}, response: {}, providerMetadata: {}, evidenceIds: [], outcome } };
-    return { workspace, checkpoint, messages: input.messages, status: "blocked", publish: false, eventProcessed: false, activityCode: "blocked", question: null };
+    return { workspace, checkpoint, messages: input.messages, status: "blocked", publish: false, eventProcessed: false, activityCode: "blocked", question: null, notices: [] };
   }
 
   const fail = (error: unknown) => { outcome = classified(error, checkpoint); return outcome; };
@@ -179,7 +190,16 @@ export async function executeAgentV2Slice(input: ExecuteAgentV2SliceInput): Prom
       } catch (error) { return fail(error); }
     }}),
     select_product: tool({ description: "Select one already-known evidence-backed product by the productId returned from search_products or read_product.", inputSchema: z.object({ requirementId: z.string(), productId: z.string() }).strict(), execute: async ({ requirementId, productId }) => { ranTool(); try { commerce = selectKnownProduct(commerce, requirementId, productId); outcome = { status: "completed", evidenceIds: [], summary: "Known product selected" }; return outcome; } catch (error) { return fail(error); } }}),
-    calculate_validate_draft: tool({ description: "Deterministically calculate readiness from evidence.", inputSchema: z.object({}).strict(), execute: async () => { ranTool(); try { candidateDraft = reviewCommerceDraft(workspace, commerce, input.budgetCents); outcome = { status: "completed", evidenceIds: [], summary: "Draft validation completed" }; return outcome; } catch (error) { return fail(error); } }}),
+    calculate_validate_draft: tool({ description: "Deterministically calculate readiness from evidence.", inputSchema: z.object({}).strict(), execute: async () => { ranTool();
+      try {
+        candidateDraft = reviewCommerceDraft(workspace, commerce, input.budgetCents);
+        for (const w of candidateDraft.warnings) {
+          const key = warningKey(w);
+          if (!notifiedWarnings.has(key)) { notifiedWarnings.add(key); notices.push({ id: randomUUID(), recipientId: w.recipientId, content: warningMessage(w) }); }
+        }
+        outcome = { status: "completed", evidenceIds: [], summary: "Draft validation completed" }; return outcome;
+      } catch (error) { return fail(error); }
+    }}),
     publish_draft: tool({ description: "Publish only the current deterministically calculated draft.", inputSchema: z.object({}).strict(), execute: async () => { ranTool(); try { if (!candidateDraft) throw new Error("Calculate draft before publication"); workspace = publishDraft(workspace, candidateDraft, workspace.inputRevision, workspace.draftRevision); commerce = bindCommerceRevision(commerce, workspace); publish = true; outcome = { status: "completed", evidenceIds: [], summary: "Draft projection ready to publish" }; return outcome; } catch (error) { return fail(error); } }}),
     ask_targeted_question: tool({ description: "Pause for one affected participant's private answer.", inputSchema: z.object({ recipientId: z.string(), taskId: z.string(), question: z.string().trim().min(1).max(1000) }).strict(), execute: async ({ recipientId, taskId, question }) => { ranTool();
       if (!workspace.participants[recipientId]) return fail(new Error("Question recipient is not a party member"));
@@ -204,6 +224,8 @@ export async function executeAgentV2Slice(input: ExecuteAgentV2SliceInput): Prom
       privateQuestion = null;
       publish = false;
       eventCompletionRequested = false;
+      notices.splice(0, notices.length);
+      notifiedWarnings = new Set(checkpoint.notifiedWarnings);
     }
     const latestOutcome: ToolOutcome = multipleTools
       ? { status: "blocked", code: "contract", summary: "Exactly one tool call is allowed per durable step" }
@@ -219,13 +241,13 @@ export async function executeAgentV2Slice(input: ExecuteAgentV2SliceInput): Prom
     const noProgressSteps = nextFingerprint === priorFingerprint ? checkpoint.noProgressSteps + 1 : 0;
     const effectiveOutcome: ToolOutcome = !eventProcessed && noProgressSteps >= 2 ? { status: "blocked", code: "no_progress", summary: "Two slices made no durable progress" } : latestOutcome;
     const retry = effectiveOutcome.status === "retry" ? effectiveOutcome : null;
-    checkpoint = CheckpointSchema.parse({ ...checkpoint, activeEventId: input.event.id, modelSteps: checkpoint.modelSteps + 1, noProgressSteps, transientAttempts: retry ? { ...checkpoint.transientAttempts, commerce: retry.attempt, model: 0 } : { ...checkpoint.transientAttempts, model: 0 }, nextAttemptAt: retry ? new Date(now().getTime() + retry.retryAfterMs).toISOString() : null, commerce, candidateDraft, openQuestions: questions, lastProgressFingerprint: nextFingerprint, lastStep: { finishReason: String(result.finalStep.finishReason), usage: result.finalStep.usage, response: result.finalStep.response, providerMetadata: result.finalStep.providerMetadata, evidenceIds, outcome: effectiveOutcome } });
+    checkpoint = CheckpointSchema.parse({ ...checkpoint, activeEventId: input.event.id, modelSteps: checkpoint.modelSteps + 1, noProgressSteps, transientAttempts: retry ? { ...checkpoint.transientAttempts, commerce: retry.attempt, model: 0 } : { ...checkpoint.transientAttempts, model: 0 }, nextAttemptAt: retry ? new Date(now().getTime() + retry.retryAfterMs).toISOString() : null, commerce, candidateDraft, openQuestions: questions, notifiedWarnings: [...notifiedWarnings], lastProgressFingerprint: nextFingerprint, lastStep: { finishReason: String(result.finalStep.finishReason), usage: result.finalStep.usage, response: result.finalStep.response, providerMetadata: result.finalStep.providerMetadata, evidenceIds, outcome: effectiveOutcome } });
     const status = publish || eventCompletionRequested ? "completed" : effectiveOutcome.status === "waiting_for_input" ? "waiting_for_input" : effectiveOutcome.status === "blocked" ? "blocked" : "queued";
-    return { workspace, checkpoint, messages: nextMessages, status, publish, eventProcessed, activityCode: status === "waiting_for_input" ? "waiting_for_input" : status === "blocked" ? "blocked" : status === "completed" ? "completed" : "working", question: privateQuestion };
+    return { workspace, checkpoint, messages: nextMessages, status, publish, eventProcessed, activityCode: status === "waiting_for_input" ? "waiting_for_input" : status === "blocked" ? "blocked" : status === "completed" ? "completed" : "working", question: privateQuestion, notices };
   } catch (error) {
     const errorOutcome: ToolOutcome = fail(error); const retry = errorOutcome.status === "retry" ? errorOutcome : null;
     checkpoint = CheckpointSchema.parse({ ...checkpoint, activeEventId: input.event.id, noProgressSteps: checkpoint.noProgressSteps, transientAttempts: retry ? { ...checkpoint.transientAttempts, commerce: retry.attempt } : checkpoint.transientAttempts, nextAttemptAt: retry ? new Date(now().getTime() + retry.retryAfterMs).toISOString() : null, lastStep: { finishReason: "error", usage: {}, response: {}, providerMetadata: {}, evidenceIds: [], outcome: errorOutcome } });
-    return { workspace, checkpoint, messages: input.messages, status: errorOutcome.status === "retry" ? "queued" : "blocked", publish: false, eventProcessed: false, activityCode: errorOutcome.status === "retry" ? "working" : "blocked", question: null };
+    return { workspace, checkpoint, messages: input.messages, status: errorOutcome.status === "retry" ? "queued" : "blocked", publish: false, eventProcessed: false, activityCode: errorOutcome.status === "retry" ? "working" : "blocked", question: null, notices: [] };
   }
 }
 
