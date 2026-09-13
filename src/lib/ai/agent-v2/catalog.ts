@@ -44,11 +44,20 @@ export function reviewCommerceDraft(workspace: Workspace, input: CommerceState, 
   draft.ready = draft.blockers.length === 0;
   return draft;
 }
-/** Returns a serializable replacement for the runtime checkpoint's commerce field. */
-export async function searchRequirement(input: CommerceState, requirementId: string, queries: string[], api: CommerceReadAdapter, substitutionsFor?: string): Promise<CommerceState> {
+export type ProductSummary = { productId: string; name: string; priceCents: number; packageQuantity: number; packageUnit: "g" | "ml" | "piece"; available: boolean; stockPackages: number | null; attributes: Record<string, string> };
+/** Deliberately excludes evidence/composition: the model must never eyeball
+ * composition text as a safety check, only deterministic code may. */
+export function summarizeProduct(p: CatalogProduct): ProductSummary {
+  return { productId: p.id, name: p.name, priceCents: p.priceCents, packageQuantity: p.packageQuantity, packageUnit: p.packageUnit, available: p.available, stockPackages: p.stockPackages, attributes: p.attributes };
+}
+/** Returns a serializable replacement for the runtime checkpoint's commerce
+ * field, plus this call's freshly-inspected candidates (not the whole
+ * accumulated product set) so the caller can show the model what it found. */
+export async function searchRequirement(input: CommerceState, requirementId: string, queries: string[], api: CommerceReadAdapter, substitutionsFor?: string): Promise<{ state: CommerceState; matched: CatalogProduct[]; limitReached: boolean }> {
   const state = CommerceStateSchema.parse(input);
   const requirement = state.requirements.find(r => r.id === requirementId);
-  if (!requirement || (state.searchRevisions[requirementId] ?? 0) >= 3) throw new Error("Requirement search revision limit reached");
+  if (!requirement) throw new Error("Unknown catalog requirement");
+  if ((state.searchRevisions[requirementId] ?? 0) >= 3) return { state, matched: [], limitReached: true };
   const cart = await api.cart();
   const found = substitutionsFor ? await api.substitutions(cart, substitutionsFor) : await api.search(cart, queries);
   const candidates = found.filter(p => p.companyId === cart.companyId && p.branchId === cart.branchId).slice(0, 30);
@@ -57,5 +66,5 @@ export async function searchRequirement(input: CommerceState, requirementId: str
     inspected.push(...await Promise.all(candidates.slice(offset, offset + 3).map(p => api.details(cart, p.productId))));
   }
   const products = [...new Map([...state.products, ...inspected].map(p => [key(p), p])).values()];
-  return { ...state, cart, products, searchRevisions: { ...state.searchRevisions, [requirementId]: (state.searchRevisions[requirementId] ?? 0) + 1 } };
+  return { state: { ...state, cart, products, searchRevisions: { ...state.searchRevisions, [requirementId]: (state.searchRevisions[requirementId] ?? 0) + 1 } }, matched: inspected, limitReached: false };
 }

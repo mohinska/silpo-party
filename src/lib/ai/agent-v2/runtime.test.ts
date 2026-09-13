@@ -154,6 +154,31 @@ describe("durable v2 ToolLoopAgent slice", () => {
     expect(result.checkpoint.lastStep?.outcome).toMatchObject({ status: "blocked", code: "limit" });
   });
 
+  const fakeCart = { cartId: "cart", cartVersion: "v1", companyId: "co", branchId: "branch", deliveryType: "SelfPickup", timeslotStart: "2026-09-14T10:00:00Z", timeslotEnd: "2026-09-14T11:00:00Z", lines: [], totalCents: 0, validationErrors: [] };
+  const fakeProduct = { id: "rice", name: "White rice", companyId: "co", branchId: "branch", packageQuantity: 500, packageUnit: "g" as const, priceCents: 100, available: true, stockPackages: 10, attributes: {}, retrievedAt: "2026-09-13T08:00:00.000Z", evidence: { id: "evidence:rice", source: "product_details" as const, sourceRef: "rice", productIdentity: { productId: "rice", companyId: "co", branchId: "branch" }, ingredients: ["rice"], composition: "rice", complete: true, verified: true } };
+  const fakeCommerce = { cart: async () => fakeCart, search: async () => [{ productId: "rice", companyId: "co", branchId: "branch", name: "White rice" }], details: async () => fakeProduct, substitutions: async () => [] };
+  const requirementId = "requirement:r1:product";
+  const commerceState = { schemaVersion: 1 as const, inputRevision: 0, draftRevision: 0, cart: null, requirements: [{ id: requirementId, requestId: "r1", name: "Rice", quantity: 500, unit: "g" as const, eaterIds: [actorId], evidenceRefs: ["request:r1:source"], requiredAttributes: {} }], products: [], selections: [], searchRevisions: {} as Record<string, number> };
+  const baseCheckpoint = (searchRevisions: Record<string, number> = {}) => ({
+    schemaVersion: 1, logicalRunId: "run-1", activeEventId: "event-1", modelSteps: 0, noProgressSteps: 0, transientAttempts: {}, nextAttemptAt: null,
+    commerce: { ...commerceState, searchRevisions }, candidateDraft: null, resumeMessageIds: [], appliedEventIds: ["event-1"], openQuestions: [], lastProgressFingerprint: "", lastStep: null,
+  });
+
+  it("returns model-visible product data from search_products, not just opaque evidence ids", async () => {
+    const model = new MockLanguageModelV4({ doGenerate: toolResult("search_products", { requirementId, queries: ["рис"] }) });
+    const result = await executeAgentV2Slice({ model, event: { id: "event-1", actorId, kind: "chat", payload: { text: "rice" }, sourceSequence: 1 }, workspace: createWorkspace(partyId, [actorId]), checkpoint: baseCheckpoint(), messages: [], budgetCents: null, commerce: fakeCommerce });
+    expect(JSON.stringify(result.messages)).toContain("White rice");
+    expect(JSON.stringify(result.messages)).toContain("priceCents");
+    expect(result.checkpoint.lastStep?.outcome).toMatchObject({ status: "completed" });
+  });
+
+  it("does not block the whole run when a requirement's search revision cap is reached", async () => {
+    const model = new MockLanguageModelV4({ doGenerate: toolResult("search_products", { requirementId, queries: ["рис"] }) });
+    const result = await executeAgentV2Slice({ model, event: { id: "event-1", actorId, kind: "chat", payload: { text: "rice" }, sourceSequence: 1 }, workspace: createWorkspace(partyId, [actorId]), checkpoint: baseCheckpoint({ [requirementId]: 3 }), messages: [], budgetCents: null, commerce: fakeCommerce });
+    expect(result.status).toBe("queued");
+    expect(result.checkpoint.lastStep?.outcome).toMatchObject({ status: "no_match" });
+  });
+
   it("starts a fresh bounded logical run for a new source event", async () => {
     const firstModel = new MockLanguageModelV4({ doGenerate: toolResult("edit_request", { edit: { kind: "add", requestId: "r1", text: "Rice", requestKind: "product" } }) });
     const first = await executeAgentV2Slice({ model: firstModel, event: { id: "event-1", actorId, kind: "chat", payload: { text: "Rice" }, sourceSequence: 1 }, workspace: createWorkspace(partyId, [actorId]), checkpoint: {}, messages: [], budgetCents: null });
