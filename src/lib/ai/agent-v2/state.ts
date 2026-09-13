@@ -6,7 +6,7 @@ export const UnitSchema = z.enum(["g", "kg", "ml", "l", "piece", "tbsp", "tsp"])
 /** exclude_term means an explicit literal ingredient preference, never an allergy/diet category.
  * Normalizers MUST preserve allergies and dietary semantics as semantic; absence of a literal
  * ingredient spelling cannot establish allergy safety (synonyms/derivatives/cross-contact). */
-export const HardRuleSchema = z.object({ id, kind: z.enum(["exclude_term", "semantic"]), value: z.string().min(1), source: id, evidenceRef: id }).strict();
+export const HardRuleSchema = z.object({ id, kind: z.enum(["exclude_term", "semantic"]), value: z.string().min(1), source: id, evidenceRef: id, ownerId: id.optional() }).strict();
 export type HardRule = z.infer<typeof HardRuleSchema>;
 export const ProductIdentitySchema = z.object({ productId: id, companyId: id, branchId: id }).strict();
 export const EvidenceSchema = z.object({ id, source: z.enum(["recipe_source", "generated_recipe", "product_details"]), sourceRef: id, productIdentity: ProductIdentitySchema.optional(), complete: z.boolean(), ingredients: z.array(z.string().min(1)), composition: z.string(), verified: z.boolean() }).strict();
@@ -33,7 +33,9 @@ export type Artifact = z.infer<typeof ArtifactSchema>;
 export const TaskOutcomeSchema = z.object({ taskId: id, status: z.enum(["completed", "waiting_for_input", "blocked", "failed", "cancelled", "superseded"]), artifactIds: z.array(id), privateReason: z.string().optional(), recipientId: id.optional() }).strict();
 export type TaskOutcome = z.infer<typeof TaskOutcomeSchema>;
 export const DraftLineSchema = z.object({ productId: id, name: z.string().min(1), companyId: id, branchId: id, requirementIds: z.array(id), eaterIds: z.array(id), packageCount: z.number().int().positive(), packageQuantity: z.number().positive(), packageUnit: z.enum(["g", "ml", "piece"]), unitPriceCents: revision, lineTotalCents: revision }).strict();
-export const DraftSchema = z.object({ inputRevision: revision, lines: z.array(DraftLineSchema), totalCents: revision, ready: z.boolean(), blockers: z.array(z.object({ code: z.enum(["empty", "missing", "unknown", "unsafe", "units", "unavailable", "budget"]), requirementId: id.optional(), privateReason: z.string().optional() }).strict()) }).strict();
+export const DraftWarningSchema = z.object({ code: z.enum(["dietary_unverified"]), requirementId: id.optional(), requirementName: z.string().optional(), recipientId: id, privateReason: z.string().optional() }).strict();
+export type DraftWarning = z.infer<typeof DraftWarningSchema>;
+export const DraftSchema = z.object({ inputRevision: revision, lines: z.array(DraftLineSchema), totalCents: revision, ready: z.boolean(), blockers: z.array(z.object({ code: z.enum(["empty", "missing", "unknown", "unsafe", "units", "unavailable", "budget"]), requirementId: id.optional(), privateReason: z.string().optional() }).strict()), warnings: z.array(DraftWarningSchema).default([]) }).strict();
 export type Draft = z.infer<typeof DraftSchema>;
 export const WorkspaceSchema = z.object({ schemaVersion: z.literal(2), partyId: id, inputRevision: revision, draftRevision: revision, participants: z.record(id, z.object({ submission: z.enum(["unsubmitted", "submitted", "indifferent"]), contexts: z.record(id, ContextSchema) }).strict()), requests: z.array(RequestSchema), artifacts: z.array(ArtifactSchema), evidence: z.array(EvidenceSchema), outcomes: z.array(TaskOutcomeSchema), draft: DraftSchema.nullable() }).strict();
 export type Workspace = z.infer<typeof WorkspaceSchema>;

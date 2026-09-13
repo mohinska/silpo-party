@@ -33,7 +33,7 @@ function reference(source: string, participantId: string, kind: string, value: s
 
 function rule(source: string, participantId: string, kind: HardRule["kind"], value: string): HardRule {
   const evidenceRef = reference(source, participantId, kind, value);
-  return { id: evidenceRef, kind, value, source, evidenceRef };
+  return { id: evidenceRef, kind, value, source, evidenceRef, ownerId: participantId };
 }
 
 async function readMembershipProfile(partyId: string, participantId: string): Promise<MembershipProfile> {

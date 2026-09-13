@@ -4,6 +4,7 @@ import { evaluateEvidence, calculateDraft, publishDraft, projectDraft } from "./
 
 const add = { kind: "add" as const, requestId: "r1", text: "Rice", requestKind: "dish" as const };
 const rule = { id: "milk", kind: "exclude_term" as const, value: "milk", source: "profile", evidenceRef: "private-e1" };
+const ownedSemanticRule = { id: "vegan", kind: "semantic" as const, value: "vegan", source: "profile", evidenceRef: "private-e2", ownerId: "a" };
 const evidence = { id: "e1", source: "product_details" as const, sourceRef: "product:123", complete: true, ingredients: ["rice"], composition: "rice", verified: true };
 const productEvidence = { ...evidence, productIdentity: { productId: "prod", companyId: "c", branchId: "b" } };
 
@@ -96,6 +97,14 @@ describe("evidence and deterministic readiness", () => {
   it("does not call incomplete composition safe even with no known rules", () => {
     expect(evaluateEvidence([], { ...evidence, complete: false }).status).toBe("unknown");
   });
+  it("warns the declaring participant instead of blocking when a semantic rule has a known owner", () => {
+    const result = evaluateEvidence([ownedSemanticRule], evidence);
+    expect(result.status).toBe("warn");
+    expect(result).toMatchObject({ recipientIds: ["a"] });
+  });
+  it("still blocks a literal exclude_term match even alongside an owned semantic rule", () => {
+    expect(evaluateEvidence([rule, ownedSemanticRule], { ...evidence, ingredients: ["milk"], composition: "milk" }).status).toBe("unsafe");
+  });
   it("blocks recipe evidence reused as product composition", () => {
     const state = applyRequestEdit(createWorkspace("p", ["a"]), "a", { ...add, requestKind: "product" });
     const requirements = [{ id: "i1", requestId: "r1", name: "Milk", quantity: 1, unit: "g" as const, eaterIds: ["a"], evidenceRefs: ["e1"] }];
@@ -142,6 +151,22 @@ describe("evidence and deterministic readiness", () => {
     state.evidence = [{ ...evidence, id: "recipe-e1", source: "recipe_source", ingredients: ["rice", "milk"], composition: "rice, milk" }];
     expect(calculateDraft(state, [requirement], [{ requirementId: "i1", product }], null).blockers[0].code).toBe("unsafe");
   });
+  it("keeps a draft ready with a private warning when only a semantic restriction is unresolved", () => {
+    let state = applyRequestEdit(createWorkspace("p", ["a"]), "a", { ...add, requestKind: "product" });
+    state = refreshContext(state, "a", { source: "profile", version: 1, status: "success", rules: [ownedSemanticRule], favorites: [], evidenceRefs: ["private-e2"] });
+    const requirements = [{ id: "i1", requestId: "r1", name: "Rice", quantity: 500, unit: "g" as const, eaterIds: ["a"], evidenceRefs: ["e1"] }];
+    const product = { id: "prod", name: "Rice", companyId: "c", branchId: "b", packageQuantity: 500, packageUnit: "g" as const, priceCents: 1000, available: true, evidence: productEvidence };
+    const draft = calculateDraft(state, requirements, [{ requirementId: "i1", product }], null);
+    expect(draft.ready).toBe(true);
+    expect(draft.blockers).toEqual([]);
+    expect(draft.warnings).toMatchObject([{ code: "dietary_unverified", requirementId: "i1", recipientId: "a" }]);
+  });
+  it("produces no warnings for a participant with no declared restriction", () => {
+    const state = applyRequestEdit(createWorkspace("p", ["a"]), "a", { ...add, requestKind: "product" });
+    const requirements = [{ id: "i1", requestId: "r1", name: "Rice", quantity: 500, unit: "g" as const, eaterIds: ["a"], evidenceRefs: ["e1"] }];
+    const product = { id: "prod", name: "Rice", companyId: "c", branchId: "b", packageQuantity: 500, packageUnit: "g" as const, priceCents: 1000, available: true, evidence: productEvidence };
+    expect(calculateDraft(state, requirements, [{ requirementId: "i1", product }], null).warnings).toEqual([]);
+  });
   it("never rounds a positive requirement down across a package boundary", () => {
     const state = applyRequestEdit(createWorkspace("p", ["a"]), "a", { ...add, requestKind: "product" });
     const product = { id: "prod", name: "Rice", companyId: "c", branchId: "b", packageQuantity: 500, packageUnit: "g" as const, priceCents: 1000, available: true, evidence: productEvidence };
@@ -159,5 +184,17 @@ describe("evidence and deterministic readiness", () => {
     expect(serialized).not.toContain("evidence");
     expect(serialized).not.toContain("contexts");
     expect(serialized).not.toContain("reason");
+  });
+  it("never publishes draft.warnings in the shared projection", () => {
+    let state = applyRequestEdit(createWorkspace("p", ["a"]), "a", { ...add, requestKind: "product" });
+    state = refreshContext(state, "a", { source: "profile", version: 1, status: "success", rules: [ownedSemanticRule], favorites: [], evidenceRefs: ["private-e2"] });
+    const requirements = [{ id: "i1", requestId: "r1", name: "Rice", quantity: 500, unit: "g" as const, eaterIds: ["a"], evidenceRefs: ["e1"] }];
+    const product = { id: "prod", name: "Rice", companyId: "c", branchId: "b", packageQuantity: 500, packageUnit: "g" as const, priceCents: 1000, available: true, evidence: productEvidence };
+    const draft = calculateDraft(state, requirements, [{ requirementId: "i1", product }], null);
+    expect(draft.warnings).not.toEqual([]);
+    const next = publishDraft(state, draft, state.inputRevision, 0);
+    const serialized = JSON.stringify(projectDraft(next));
+    expect(serialized).not.toContain("warning");
+    expect(serialized).not.toContain("dietary_unverified");
   });
 });
