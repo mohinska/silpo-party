@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { ToolLoopAgent, isStepCount, tool, type LanguageModel, type ModelMessage } from "ai";
 import { z } from "zod";
-import { bindCommerceRevision, CommerceStateSchema, createCommerceState, reviewCommerceDraft, searchRequirement, selectKnownProduct, type CommerceState } from "./catalog";
+import { bindCommerceRevision, CommerceStateSchema, createCommerceState, reviewCommerceDraft, searchRequirement, selectKnownProduct, summarizeProduct, type CommerceState, type ProductSummary } from "./catalog";
 import { CommerceError, type CommerceReadAdapter } from "./commerce-contract";
 import { publishDraft } from "./draft";
 import { deriveRecipeRequirements, resolveRecipeSource, validateGeneratedRecipe } from "./recipes";
@@ -60,6 +60,8 @@ function instructions(event: RuntimeEvent, workspace: Workspace, checkpoint: Age
     "Never write a cart. Only deterministic server tools decide readiness, prices, quantities, revisions, and publication.",
     "Do not disclose private context in shared output. The event actor may edit only their own requests.",
     "Use evidence-backed recipe and product tools. Unknown evidence is not safe. Ask a targeted question only to an affected member.",
+    "When calling search_products, use concrete Ukrainian product-name query phrases (brand/type/variant synonyms for the ingredient), not the raw recipe sentence -- search is literal catalog matching, not semantic. Take productId only from a prior search_products/read_product tool result; never construct or parse one.",
+    "A requirement search is capped at three revisions. Once reached, or once no acceptable candidate is found, stop retrying that requirement and continue with calculate_validate_draft/publish_draft/complete_event -- leaving it unresolved is a normal, visible per-line draft blocker, not a failure.",
     `Current private server state: ${JSON.stringify({ event: { id: event.id, actorId: event.actorId, kind: event.kind, payload: event.payload }, requests: workspace.requests, participantContexts: Object.fromEntries(Object.entries(workspace.participants).map(([id, participant]) => [id, participant.contexts])), artifacts: workspace.artifacts.map(a => ({ id: a.id, valid: a.valid, kind: a.kind, dependsOn: a.dependsOn })), commerce: { requirements: checkpoint.commerce.requirements, selections: checkpoint.commerce.selections, searchRevisions: checkpoint.commerce.searchRevisions }, draft: workspace.draft ? { inputRevision: workspace.draft.inputRevision, ready: workspace.draft.ready, blockers: workspace.draft.blockers.map(b => b.code) } : null, budgetCents, stepsRemaining: Math.max(0, 20 - checkpoint.modelSteps) })}`,
   ].join("\n");
 }
@@ -154,14 +156,29 @@ export async function executeAgentV2Slice(input: ExecuteAgentV2SliceInput): Prom
     submit_generated_recipe: tool({ description: "Submit a complete generated recipe with quantities and preparation steps.", inputSchema: z.object({ requestId: z.string(), recipe: z.unknown() }).strict(), execute: async ({ requestId, recipe }) => { ranTool();
       try { const derived = deriveRecipeRequirements(workspace, requestId, validateGeneratedRecipe(recipe)); workspace = { ...workspace, evidence: [...workspace.evidence, ...derived.evidence], artifacts: [...workspace.artifacts, ...derived.artifacts] }; commerce = { ...commerce, requirements: [...commerce.requirements.filter(r => r.requestId !== requestId), ...derived.requirements] }; outcome = { status: "completed", evidenceIds: derived.evidence.map(e => e.id), summary: "Generated recipe validated" }; return outcome; } catch (error) { return fail(error); }
     }}),
-    search_products: tool({ description: "Search known products for one requirement, at most three revisions.", inputSchema: z.object({ requirementId: z.string(), queries: z.array(z.string().min(1)).min(1).max(30), substitutionsFor: z.string().optional() }).strict(), execute: async ({ requirementId, queries, substitutionsFor }) => { ranTool();
-      try { commerce = await withCommerce(api => searchRequirement(commerce, requirementId, queries, api, substitutionsFor)); outcome = { status: commerce.products.length ? "completed" : "no_match", evidenceIds: commerce.products.map(p => p.evidence.id), summary: "Catalog search completed" }; return outcome; } catch (error) { return fail(error); }
+    search_products: tool({ description: "Search known products for one requirement (short, specific Ukrainian product-name query phrases per call -- e.g. brand/type/variant synonyms, not the raw recipe sentence; this is literal catalog search, not semantic). At most three revisions per requirement; once reached, or once no acceptable candidate is found, stop retrying and move on -- an unresolved requirement stays a visible per-line draft blocker, it does not block the whole run.", inputSchema: z.object({ requirementId: z.string(), queries: z.array(z.string().min(1)).min(1).max(30), substitutionsFor: z.string().optional() }).strict(), execute: async ({ requirementId, queries, substitutionsFor }) => { ranTool();
+      try {
+        const { state, matched, limitReached } = await withCommerce(api => searchRequirement(commerce, requirementId, queries, api, substitutionsFor));
+        commerce = state;
+        outcome = matched.length ? { status: "completed", evidenceIds: matched.map(p => p.evidence.id), summary: "Catalog search completed" } : { status: "no_match", evidenceIds: [], summary: limitReached ? "Search revision limit reached; stop retrying this requirement" : "No candidates matched this requirement" };
+        return { ...outcome, products: matched.map(summarizeProduct), limitReached };
+      } catch (error) { return fail(error); }
     }}),
-    read_product: tool({ description: "Read details for a discovered product only.", inputSchema: z.object({ requirementId: z.string(), productId: z.string() }).strict(), execute: async ({ requirementId, productId }) => { ranTool();
+    read_product: tool({ description: "Read full details for one already-discovered candidate. Use the productId from a prior search_products/read_product result.", inputSchema: z.object({ requirementId: z.string(), productId: z.string() }).strict(), execute: async ({ requirementId, productId }) => { ranTool();
       if (!commerce.requirements.some(r => r.id === requirementId)) return fail(new CommerceError("unavailable", "Catalog requirement unavailable"));
-      try { await withCommerce(async api => { const cart = commerce.cart ?? await api.cart(); const product = await api.details(cart, productId); commerce = { ...commerce, cart, products: [...commerce.products.filter(p => p.id !== product.id || p.companyId !== product.companyId || p.branchId !== product.branchId), product] }; outcome = { status: "completed", evidenceIds: [product.evidence.id], summary: "Product details recorded" }; }); return outcome; } catch (error) { return fail(error); }
+      let product: ProductSummary | null = null;
+      try {
+        await withCommerce(async api => {
+          const cart = commerce.cart ?? await api.cart();
+          const p = await api.details(cart, productId);
+          commerce = { ...commerce, cart, products: [...commerce.products.filter(x => x.id !== p.id || x.companyId !== p.companyId || x.branchId !== p.branchId), p] };
+          outcome = { status: "completed", evidenceIds: [p.evidence.id], summary: "Product details recorded" };
+          product = summarizeProduct(p);
+        });
+        return { ...outcome, product };
+      } catch (error) { return fail(error); }
     }}),
-    select_product: tool({ description: "Select one already-known evidence-backed product.", inputSchema: z.object({ requirementId: z.string(), productId: z.string() }).strict(), execute: async ({ requirementId, productId }) => { ranTool(); try { commerce = selectKnownProduct(commerce, requirementId, productId); outcome = { status: "completed", evidenceIds: [], summary: "Known product selected" }; return outcome; } catch (error) { return fail(error); } }}),
+    select_product: tool({ description: "Select one already-known evidence-backed product by the productId returned from search_products or read_product.", inputSchema: z.object({ requirementId: z.string(), productId: z.string() }).strict(), execute: async ({ requirementId, productId }) => { ranTool(); try { commerce = selectKnownProduct(commerce, requirementId, productId); outcome = { status: "completed", evidenceIds: [], summary: "Known product selected" }; return outcome; } catch (error) { return fail(error); } }}),
     calculate_validate_draft: tool({ description: "Deterministically calculate readiness from evidence.", inputSchema: z.object({}).strict(), execute: async () => { ranTool(); try { candidateDraft = reviewCommerceDraft(workspace, commerce, input.budgetCents); outcome = { status: "completed", evidenceIds: [], summary: "Draft validation completed" }; return outcome; } catch (error) { return fail(error); } }}),
     publish_draft: tool({ description: "Publish only the current deterministically calculated draft.", inputSchema: z.object({}).strict(), execute: async () => { ranTool(); try { if (!candidateDraft) throw new Error("Calculate draft before publication"); workspace = publishDraft(workspace, candidateDraft, workspace.inputRevision, workspace.draftRevision); commerce = bindCommerceRevision(commerce, workspace); publish = true; outcome = { status: "completed", evidenceIds: [], summary: "Draft projection ready to publish" }; return outcome; } catch (error) { return fail(error); } }}),
     ask_targeted_question: tool({ description: "Pause for one affected participant's private answer.", inputSchema: z.object({ recipientId: z.string(), taskId: z.string(), question: z.string().trim().min(1).max(1000) }).strict(), execute: async ({ recipientId, taskId, question }) => { ranTool();
