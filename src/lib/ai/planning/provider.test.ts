@@ -4,6 +4,7 @@ vi.mock("server-only", () => ({}));
 
 import {
   createConfiguredPlanningProvider,
+  createConfiguredAgentModel,
   resolvePlanningProviderConfig,
 } from "./provider";
 
@@ -57,5 +58,12 @@ describe("createConfiguredPlanningProvider", () => {
       "deepseek-planner-test",
     );
     expect(provider.supervisorModel().modelId).toBe("deepseek-supervisor-test");
+  });
+});
+
+describe("createConfiguredAgentModel", () => {
+  it("creates a native model without the JSON-only response transform", () => {
+    const model = createConfiguredAgentModel({ ...validEnvironment, AI_AGENT_MODEL: "durable-tools" });
+    expect((model as { modelId: string }).modelId).toBe("durable-tools");
   });
 });

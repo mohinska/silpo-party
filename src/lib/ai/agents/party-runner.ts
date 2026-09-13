@@ -8,6 +8,37 @@ import { runSupervisorDecision } from "./supervisor";
 import { canRetryAgentRun } from "./agent-run";
 import { claimAgentRun, readAgentRun, updateAgentRun, type AgentRunRecord } from "./agent-runs";
 import type { FoodIntent, FoodProfile, Party, PartyMember } from "@/lib/parties";
+import { createConfiguredAgentModel } from "@/lib/ai/planning/provider";
+import { createAgentV2Repository, readAgentV2Event, readAgentV2Steps } from "@/lib/ai/agent-v2/repository";
+import { runAgentV2WorkerSlice } from "@/lib/ai/agent-v2/worker";
+import { createParticipantContextLoader } from "@/lib/ai/agent-v2/context-loader";
+import { createPartyHostCommerceAuthorityRepository, resolveVerifiedPartyHostCommerceAuthority, withVerifiedPartyHostCommerce } from "@/lib/ai/agent-v2/host-commerce";
+import { agentV2Enabled } from "./agent-version";
+
+async function runV2WorkerSlice() {
+  let model: ReturnType<typeof createConfiguredAgentModel> | null = null;
+  try { model = createConfiguredAgentModel(); } catch { /* Durable runtime records an explicit blocked outcome. */ }
+  return runAgentV2WorkerSlice({
+    workerId: `node-${process.pid}`,
+    model,
+    repository: createAgentV2Repository(),
+    readEvent: readAgentV2Event,
+    readSteps: readAgentV2Steps,
+    loadContext: (partyId, participantId, source, previousVersion) => createParticipantContextLoader(partyId)(participantId, source, previousVersion),
+    openCommerce: async ({ partyId, actorId, signal }, operation) => {
+      const authority = await resolveVerifiedPartyHostCommerceAuthority(
+        { partyId, actorId },
+        createPartyHostCommerceAuthorityRepository(),
+      );
+      return withVerifiedPartyHostCommerce(authority, operation, signal);
+    },
+    budgetForParty: async partyId => {
+      const { data, error } = await createAdminClient().from("parties").select("budget_cents").eq("id", partyId).single();
+      if (error || !data) throw error ?? new Error("Party unavailable");
+      return data.budget_cents as number | null;
+    },
+  });
+}
 
 type AgentWorkspace = {
   party: Party;
@@ -144,6 +175,7 @@ async function failRun(run: AgentRunRecord, error: unknown) {
 }
 
 export async function runPartyAgentRun(runId?: string) {
+  if (agentV2Enabled()) return runV2WorkerSlice();
   const run = await claimAgentRun(runId);
   if (!run) return null;
   try {
@@ -155,6 +187,11 @@ export async function runPartyAgentRun(runId?: string) {
 }
 
 export async function dispatchPartyAgentRun(runId: string) {
+  if (agentV2Enabled()) {
+    // The source event is already durable. A 5-second dispatcher/worker poll
+    // claims it later; v1 is never invoked beside v2 as a competing writer.
+    return;
+  }
   const dispatcherUrl = process.env.AGENT_DISPATCHER_URL?.trim();
   const workerSecret = process.env.AGENT_WORKER_SECRET?.trim();
   if (!dispatcherUrl || !workerSecret) {

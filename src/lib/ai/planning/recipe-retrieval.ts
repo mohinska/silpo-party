@@ -60,7 +60,7 @@ function numberFrom(value: string) {
   return Number(normalized);
 }
 
-function parseIngredient(raw: string) {
+export function parseIngredient(raw: string) {
   const text = decodeHtml(raw).replace(/[–—]/g, "-").trim();
   const unitPattern = "kg|кг|g|гр?|г|ml|мл|l|л|tbsp|ст\\.?\\s*л\\.?|tsp|ч\\.?\\s*л\\.?|piece|pieces|pcs?|шт\\.?|зубчики?|склянки?|пучки?";
   const leading = text.match(new RegExp(`^(\\d+(?:[.,]\\d+)?(?:\\s+\\d+\\/\\d+)?|\\d+\\/\\d+)\\s*(${unitPattern})\\s+(.+)$`, "iu"));

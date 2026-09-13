@@ -1,5 +1,6 @@
 "use server";
 
+import { randomUUID } from "node:crypto";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { requireUser } from "@/lib/auth";
@@ -15,9 +16,14 @@ import { applyMealProposal, createMealProposal, rejectMealProposal } from "@/lib
 import { applyIntentDelta, parseIntentDelta } from "@/lib/ai/agents/intent";
 import { createAgentRun, linkAgentRunToMessage } from "@/lib/ai/agents/agent-runs";
 import { dispatchPartyAgentRun } from "@/lib/ai/agents/party-runner";
+import { agentV2Enabled } from "@/lib/ai/agents/agent-version";
 import { createConfiguredPlanningProvider } from "@/lib/ai/planning/provider";
 import { getPartyWorkspace } from "@/lib/parties";
 import { parseFoodIntentInput } from "@/lib/food-intent-input";
+import { createAgentV2Repository } from "@/lib/ai/agent-v2/repository";
+import { createCartOperationRepository } from "@/lib/ai/agent-v2/cart-repository";
+import { applyApprovedCart, reconcileCartOperation } from "@/lib/ai/agent-v2/cart-reconciliation";
+import { createHostCommerceAuthorityRepository, resolveVerifiedHostCommerceAuthority, withVerifiedHostCommerce } from "@/lib/ai/agent-v2/host-commerce";
 
 function clean(value: FormDataEntryValue | null, max: number) {
   return String(value ?? "").trim().slice(0, max);
@@ -29,6 +35,20 @@ function userIdentity(user: Awaited<ReturnType<typeof requireUser>>) {
     member_email: user.email ?? null,
     member_avatar: typeof user.user_metadata.avatar_url === "string" ? user.user_metadata.avatar_url : null,
   };
+}
+
+async function submitAgentV2Chat(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  partyId: string,
+  content: string,
+  replyToMessageId: string | null = null,
+) {
+  const { error } = await supabase.rpc("agent_v2_submit_chat", {
+    p_party_id: partyId,
+    p_content: content,
+    p_reply_to_message_id: replyToMessageId,
+  });
+  if (error) throw new Error(error.message);
 }
 
 async function partyForMember(code: string) {
@@ -65,7 +85,7 @@ export async function joinByCode(formData: FormData) {
 export async function joinParty(code: string) {
   const user = await requireUser();
   const supabase = await createClient();
-  const { data, error } = await supabase.rpc("join_party", {
+  const { data, error } = await supabase.rpc(agentV2Enabled() ? "agent_v2_join_party" : "join_party", {
     party_code: code.trim().toUpperCase(),
     ...userIdentity(user),
   });
@@ -79,6 +99,15 @@ export async function saveBudget(code: string, formData: FormData) {
   const rawBudget = clean(formData.get("budget"), 20).replace(",", ".");
   const budget = rawBudget ? Number(rawBudget) : null;
   if (budget !== null && (!Number.isFinite(budget) || budget < 0 || budget > 10_000_000)) throw new Error("Вкажіть коректний бюджет.");
+  if (agentV2Enabled()) {
+    const { error } = await supabase.rpc("agent_v2_update_budget", {
+      p_party_id: party.id,
+      p_budget_cents: budget === null ? null : Math.round(budget * 100),
+    });
+    if (error) throw new Error(error.message);
+    revalidatePath(`/party/${party.code}`);
+    return;
+  }
   const { error } = await supabase.from("parties").update({
     budget_cents: budget === null ? null : Math.round(budget * 100),
     updated_at: new Date().toISOString(),
@@ -93,6 +122,19 @@ export async function saveIntent(code: string, formData: FormData) {
   const input = clean(formData.get("intent"), 1_200);
   const parsed = parseFoodIntentInput(input);
   const indifferent = formData.get("indifferent") === "on";
+  if (agentV2Enabled()) {
+    const { error } = await supabase.rpc("agent_v2_submit_intent", {
+      p_party_id: party.id,
+      p_text: input,
+      p_dish_name: indifferent ? "" : parsed.dishName,
+      p_description: indifferent ? "" : parsed.description,
+      p_content_url: indifferent ? "" : parsed.contentUrl,
+      p_indifferent: indifferent,
+    });
+    if (error) throw new Error(error.message);
+    revalidatePath(`/party/${party.code}`);
+    return;
+  }
   const { error } = await supabase.from("food_intents").upsert({
     party_id: party.id,
     user_id: user.id,
@@ -122,6 +164,13 @@ export async function sendPartyAgentMessage(code: string, formData: FormData) {
   if (party.status !== "collecting") throw new Error("Подію вже фіналізовано.");
   const content = clean(formData.get("content"), 2_000);
   if (!content) throw new Error("Напишіть, що потрібно додати або змінити.");
+
+  if (agentV2Enabled()) {
+    const replyToMessageId = clean(formData.get("replyToMessageId"), 36);
+    await submitAgentV2Chat(supabase, party.id, content, replyToMessageId || null);
+    revalidatePath(`/party/${party.code}`);
+    return;
+  }
 
   const workspaceBeforeMessage = await getPartyWorkspace(party.code);
   const previous = workspaceBeforeMessage.intents.find((intent) => intent.user_id === user.id);
@@ -166,6 +215,7 @@ export async function sendPartyAgentMessage(code: string, formData: FormData) {
 export async function addItem(code: string, formData: FormData) {
   const { user, supabase, party } = await partyForMember(code);
   if (party.status !== "collecting") throw new Error("Подію вже фіналізовано.");
+  if (agentV2Enabled()) throw new Error("У Agent v2 додавайте товари через чат — агент збере нову перевірену чернетку.");
   const name = clean(formData.get("name"), 120);
   const productId = clean(formData.get("silpo_product_id"), 120);
   const companyId = clean(formData.get("silpo_company_id"), 120);
@@ -227,6 +277,7 @@ export async function searchSilpoProducts(code: string, query: string): Promise<
 export async function updateItem(code: string, itemId: string, formData: FormData) {
   const { supabase, party } = await partyForMember(code);
   if (party.status !== "collecting") throw new Error("Подію вже фіналізовано.");
+  if (agentV2Enabled()) throw new Error("У Agent v2 змінюйте товари через чат — агент створить нову версію чернетки.");
   const name = clean(formData.get("name"), 120);
   const quantity = Number(clean(formData.get("quantity"), 20).replace(",", "."));
   if (!name || !Number.isInteger(quantity) || quantity <= 0) {
@@ -251,6 +302,7 @@ export async function updateItem(code: string, itemId: string, formData: FormDat
 export async function deleteItem(code: string, itemId: string) {
   const { supabase, party } = await partyForMember(code);
   if (party.status !== "collecting") throw new Error("Подію вже фіналізовано.");
+  if (agentV2Enabled()) throw new Error("У Agent v2 видаляйте товари через чат — кошик зміниться лише після нового підтвердження.");
   const { data: item, error: itemError } = await supabase
     .from("basket_items")
     .select("id, name, quantity, unit, unit_price_cents, silpo_product_id, silpo_company_id, silpo_branch_id")
@@ -266,6 +318,7 @@ export async function deleteItem(code: string, itemId: string) {
 }
 
 export async function syncSilpoBasket(code: string) {
+  if (agentV2Enabled()) throw new Error("Agent v2 синхронізує лише точну підтверджену версію чернетки.");
   const { user, party } = await partyForMember(code);
   if (party.host_id !== user.id) throw new Error("Лише Організатор може запускати повну синхронізацію.");
   if (party.status !== "collecting") throw new Error("Поверніть подію до редагування перед синхронізацією.");
@@ -274,6 +327,7 @@ export async function syncSilpoBasket(code: string) {
 }
 
 export async function finalizeParty(code: string, formData: FormData) {
+  if (agentV2Enabled()) throw new Error("Agent v2 не використовує стару фіналізацію кошика.");
   const { user, supabase, party } = await partyForMember(code);
   if (party.host_id !== user.id) throw new Error("Лише Організатор може фіналізувати кошик.");
   if (party.status !== "collecting") throw new Error("Кошик уже фіналізовано.");
@@ -314,6 +368,7 @@ export async function finalizeParty(code: string, formData: FormData) {
 }
 
 export async function reopenParty(code: string) {
+  if (agentV2Enabled()) throw new Error("Agent v2 працює через версії чернетки без старого режиму повторного відкриття.");
   const { user, supabase, party } = await partyForMember(code);
   if (party.host_id !== user.id) throw new Error("Лише Організатор може відновити редагування.");
   const { error } = await supabase.from("parties").update({
@@ -326,6 +381,7 @@ export async function reopenParty(code: string) {
 }
 
 export async function runAiMealPlanner(code: string) {
+  if (agentV2Enabled()) throw new Error("Agent v2 запускається автоматично від кожної події.");
   const workspace = await getPartyWorkspace(code);
   if (workspace.party.host_id !== workspace.user.id) throw new Error("Only the Host may run AI meal planning.");
   if (workspace.party.status !== "collecting") throw new Error("Reopen the party before planning.");
@@ -335,6 +391,7 @@ export async function runAiMealPlanner(code: string) {
 }
 
 export async function sendPartyToSilpo(code: string) {
+  if (agentV2Enabled()) throw new Error("Підтвердьте точну готову версію Agent v2 замість старої синхронізації.");
   const { user, party } = await partyForMember(code);
   if (party.host_id !== user.id) throw new Error("Лише Організатор може відправити кошик до «Сільпо».");
   if (party.status !== "finalized") throw new Error("Спочатку фіналізуйте кошик.");
@@ -344,6 +401,7 @@ export async function sendPartyToSilpo(code: string) {
 }
 
 export async function confirmAiProposal(code: string, proposalId: string) {
+  if (agentV2Enabled()) throw new Error("Стара AI-пропозиція не може бути підтверджена в Agent v2.");
   const { user, party } = await partyForMember(code);
   if (party.status !== "collecting") throw new Error("Поверніть подію до редагування перед підтвердженням пропозиції.");
   await applyMealProposal({ proposalId, party: party as Parameters<typeof applyMealProposal>[0]["party"], actorId: user.id });
@@ -351,7 +409,54 @@ export async function confirmAiProposal(code: string, proposalId: string) {
 }
 
 export async function rejectAiProposal(code: string, proposalId: string) {
+  if (agentV2Enabled()) throw new Error("Стара AI-пропозиція недоступна в Agent v2.");
   const { user, party } = await partyForMember(code);
   await rejectMealProposal({ proposalId, party: party as Parameters<typeof rejectMealProposal>[0]["party"], actorId: user.id });
+  revalidatePath(`/party/${party.code}`);
+}
+
+export async function approveAgentV2Draft(code: string, draftRevision: number) {
+  if (!agentV2Enabled()) throw new Error("Agent v2 не активований.");
+  const { user, party } = await partyForMember(code);
+  if (party.host_id !== user.id) throw new Error("Лише Організатор може підтвердити кошик.");
+  if (party.status !== "collecting") throw new Error("Подія закрита для змін.");
+  if (!Number.isSafeInteger(draftRevision) || draftRevision <= 0) throw new Error("Некоректна версія чернетки.");
+
+  const operationId = await createAgentV2Repository().approve({
+    partyId: party.id,
+    actorId: user.id,
+    draftRevision,
+    idempotencyKey: `party:${party.id}:draft:${draftRevision}`,
+  });
+  const authority = await resolveVerifiedHostCommerceAuthority(
+    { operationId, actorId: user.id },
+    createHostCommerceAuthorityRepository(),
+  );
+  const result = await withVerifiedHostCommerce(authority, api => applyApprovedCart({
+    operationId,
+    actorId: user.id,
+    workerId: `approval-${randomUUID()}`,
+  }, createCartOperationRepository(), api));
+  if (result.status !== "verified") throw new Error("Стан запису в кошик невідомий. Потрібна безпечна звірка перед повтором.");
+  revalidatePath(`/party/${party.code}`);
+}
+
+export async function reconcileAgentV2Cart(code: string, operationId: string) {
+  if (!agentV2Enabled()) throw new Error("Agent v2 не активований.");
+  const { user, party } = await partyForMember(code);
+  if (party.host_id !== user.id) throw new Error("Лише Організатор може звірити кошик.");
+  const repository = createCartOperationRepository();
+  const operation = await repository.read(operationId, user.id);
+  if (!operation.worker_id || !["applying", "unknown"].includes(operation.status)) throw new Error("Операція не потребує звірки.");
+  const authority = await resolveVerifiedHostCommerceAuthority(
+    { operationId, actorId: user.id },
+    createHostCommerceAuthorityRepository(),
+  );
+  const result = await withVerifiedHostCommerce(authority, api => reconcileCartOperation({
+    operationId,
+    actorId: user.id,
+    workerId: operation.worker_id!,
+  }, repository, api));
+  if (result.status !== "verified") throw new Error("Кошик ще не збігається з підтвердженою версією. Автоматичний повтор запису заблоковано.");
   revalidatePath(`/party/${party.code}`);
 }
