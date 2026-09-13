@@ -2,7 +2,7 @@ import {
   createOpenAICompatible,
   type OpenAICompatibleProvider,
 } from "@ai-sdk/openai-compatible";
-import { generateText } from "ai";
+import { generateText, type LanguageModel } from "ai";
 
 import {
   PlanningConfigurationError,
@@ -102,4 +102,19 @@ export function createConfiguredPlanningProvider(
     groupPlannerModel: () => createJsonTextModel(deepseek(config.plannerModel)),
     supervisorModel: () => createJsonTextModel(deepseek(config.supervisorModel)),
   };
+}
+
+/** ToolLoopAgent must use native provider tool-call responses. The legacy JSON
+ * helper above deliberately keeps its response_format transform isolated. */
+export function createConfiguredAgentModel(
+  environment: PlanningEnvironment = process.env,
+): LanguageModel {
+  const config = resolvePlanningProviderConfig(environment);
+  const provider = createOpenAICompatible({
+    name: config.provider,
+    apiKey: config.apiKey,
+    baseURL: config.baseUrl,
+    supportsStructuredOutputs: false,
+  });
+  return provider(environment.AI_AGENT_MODEL?.trim() || config.plannerModel);
 }

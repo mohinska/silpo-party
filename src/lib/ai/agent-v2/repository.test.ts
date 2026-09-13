@@ -33,4 +33,26 @@ describe("agent v2 repository boundary", () => {
     const malformed = createAgentV2Repository(async () => ({ data: [{ workspace: {} }], error: null }));
     await expect(malformed.claim("w")).rejects.toThrow();
   });
+  it("passes a persisted retry eligibility time through its fenced acknowledgement", async () => {
+    let args: Record<string, unknown> = {};
+    const repo = createAgentV2Repository(async (_name, parameters) => { args = parameters; return { data: null, error: null }; });
+    await repo.acknowledge({
+      jobId: "20000000-0000-4000-8000-000000000001", workerId: "w", fence: 7,
+      stepSequence: 2, status: "queued", nextAttemptAt: "2026-09-13T12:00:00.000Z",
+    });
+    expect(args).toMatchObject({ p_status: "queued", p_next_attempt_at: "2026-09-13T12:00:00.000Z" });
+  });
+  it("persists checkpoint and acknowledgement through one atomic RPC", async () => {
+    let called = "";
+    let args: Record<string, unknown> = {};
+    const repo = createAgentV2Repository(async (name, parameters) => { called = name; args = parameters; return { data: null, error: null }; });
+    await repo.checkpointAndAcknowledge({
+      jobId: "20000000-0000-4000-8000-000000000001", workerId: "w", fence: 7,
+      expectedInputRevision: 0, expectedDraftRevision: 0, expectedSourceRevision: 1,
+      eventProcessed: true, stepSequence: 1, workspace: createWorkspace(partyId, [actorId]),
+      messages: [], checkpoint: {}, status: "completed",
+    });
+    expect(called).toBe("agent_v2_checkpoint_and_ack");
+    expect(args).toMatchObject({ p_step: 1, p_event_processed: true, p_status: "completed" });
+  });
 });

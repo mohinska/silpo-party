@@ -18,11 +18,13 @@ export const RequestSchema = z.object({ id, participantId: id, version: revision
 export type FoodRequest = z.infer<typeof RequestSchema>;
 export const RequestEditSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("add"), requestId: id, text: z.string().min(1), requestKind: RequestSchema.shape.kind, eaterIds: z.array(id).min(1).optional(), servings: z.number().positive().optional() }),
+  z.object({ kind: z.literal("upsert"), requestId: id, text: z.string().min(1), requestKind: RequestSchema.shape.kind, eaterIds: z.array(id).min(1).optional(), servings: z.number().positive().optional() }),
   z.object({ kind: z.literal("remove"), requestId: id }),
   z.object({ kind: z.literal("replace"), requestId: id, text: z.string().min(1), requestKind: RequestSchema.shape.kind }),
   z.object({ kind: z.literal("quantity"), requestId: id, quantity: z.number().positive().max(1000000), unit: UnitSchema }),
   z.object({ kind: z.literal("servings"), requestId: id, servings: z.number().positive().max(10000) }),
   z.object({ kind: z.literal("eaters"), requestId: id, eaterIds: z.array(id).min(1) }),
+  z.object({ kind: z.literal("indifferent") }),
   z.object({ kind: z.literal("question"), text: z.string().min(1) }),
 ]);
 export type RequestEdit = z.infer<typeof RequestEditSchema>;
@@ -60,13 +62,34 @@ export function applyRequestEdit(workspace: Workspace, actorId: string, input: R
   const edit = RequestEditSchema.parse(input);
   if (!workspace.participants[actorId]) throw new Error("Party membership required");
   if (edit.kind === "question") return workspace;
+  if (edit.kind === "indifferent") {
+    const owned = workspace.requests.filter(request => request.participantId === actorId);
+    if (!owned.length && workspace.participants[actorId].submission === "indifferent") return workspace;
+    const changedRoots = owned.flatMap(request => {
+      const roots = requestDependencyKeys(request.id);
+      return [roots.source, roots.scaling, roots.eaters, `request:${request.id}`];
+    });
+    return WorkspaceSchema.parse({
+      ...workspace,
+      inputRevision: workspace.inputRevision + 1,
+      participants: { ...workspace.participants, [actorId]: { ...workspace.participants[actorId], submission: "indifferent" } },
+      requests: workspace.requests.filter(request => request.participantId !== actorId),
+      artifacts: invalidateArtifacts(workspace.artifacts, changedRoots),
+    });
+  }
   const current = workspace.requests.find(r => r.id === edit.requestId);
-  if (edit.kind === "add" ? Boolean(current) : !current || current.participantId !== actorId) throw new Error("Request unavailable");
+  if (edit.kind === "add" ? Boolean(current) : edit.kind === "upsert" ? Boolean(current && current.participantId !== actorId) : !current || current.participantId !== actorId) throw new Error("Request unavailable");
   let replacement: FoodRequest | undefined;
-  if (edit.kind === "add") replacement = RequestSchema.parse({ id: edit.requestId, participantId: actorId, version: 1, text: edit.text, kind: edit.requestKind, eaterIds: [...new Set(edit.eaterIds ?? [actorId])].sort(), servings: edit.servings ?? (edit.eaterIds?.length ?? 1) });
+  if (edit.kind === "add" || (edit.kind === "upsert" && !current)) replacement = RequestSchema.parse({ id: edit.requestId, participantId: actorId, version: 1, text: edit.text, kind: edit.requestKind, eaterIds: [...new Set(edit.eaterIds ?? [actorId])].sort(), servings: edit.servings ?? (edit.eaterIds?.length ?? 1) });
   else if (current && edit.kind !== "remove") {
     replacement = { ...current };
     if (edit.kind === "replace") { replacement.text = edit.text; replacement.kind = edit.requestKind; }
+    if (edit.kind === "upsert") {
+      replacement.text = edit.text;
+      replacement.kind = edit.requestKind;
+      if (edit.eaterIds) replacement.eaterIds = [...new Set(edit.eaterIds)].sort();
+      if (edit.servings) replacement.servings = edit.servings;
+    }
     if (edit.kind === "quantity") { replacement.quantity = edit.quantity; replacement.unit = edit.unit; }
     if (edit.kind === "servings") replacement.servings = edit.servings;
     if (edit.kind === "eaters") replacement.eaterIds = [...new Set(edit.eaterIds)].sort();

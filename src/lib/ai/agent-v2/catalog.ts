@@ -3,7 +3,7 @@ import { z } from "zod";
 import { calculateDraft, DraftProductSchema } from "./draft";
 import { type Workspace } from "./state";
 import { CommerceRequirementSchema } from "./recipes";
-import { CatalogProductSchema, CartSnapshotSchema, productKey, type CommerceAdapter, type CatalogProduct } from "./commerce-contract";
+import { CatalogProductSchema, CartSnapshotSchema, productKey, type CommerceReadAdapter, type CatalogProduct } from "./commerce-contract";
 
 export const CommerceStateSchema = z.object({ schemaVersion: z.literal(1), inputRevision: z.number().int().nonnegative(), draftRevision: z.number().int().nonnegative(), cart: CartSnapshotSchema.nullable(), requirements: z.array(CommerceRequirementSchema), products: z.array(CatalogProductSchema), selections: z.array(z.object({ requirementId: z.string(), productKey: z.string() }).strict()), searchRevisions: z.record(z.string(), z.number().int().min(0).max(3)) }).strict();
 export type CommerceState = z.infer<typeof CommerceStateSchema>;
@@ -45,7 +45,7 @@ export function reviewCommerceDraft(workspace: Workspace, input: CommerceState, 
   return draft;
 }
 /** Returns a serializable replacement for the runtime checkpoint's commerce field. */
-export async function searchRequirement(input: CommerceState, requirementId: string, queries: string[], api: CommerceAdapter, substitutionsFor?: string): Promise<CommerceState> {
+export async function searchRequirement(input: CommerceState, requirementId: string, queries: string[], api: CommerceReadAdapter, substitutionsFor?: string): Promise<CommerceState> {
   const state = CommerceStateSchema.parse(input);
   const requirement = state.requirements.find(r => r.id === requirementId);
   if (!requirement || (state.searchRevisions[requirementId] ?? 0) >= 3) throw new Error("Requirement search revision limit reached");

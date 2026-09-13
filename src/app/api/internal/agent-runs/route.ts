@@ -2,6 +2,9 @@ import { timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import { runPartyAgentRun } from "@/lib/ai/agents/party-runner";
 
+export const runtime = "nodejs";
+export const maxDuration = 60;
+
 const RequestSchema = z.object({ runId: z.string().uuid().optional() }).strict();
 
 function authorized(request: Request) {

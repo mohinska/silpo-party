@@ -19,6 +19,7 @@ update public.party_agent_workspaces set processed_source_revision=1,input_revis
 select extensions.throws_ok($$select public.agent_v2_cart_acquire((select id from operations),'00000000-0000-0000-0000-000000000011','worker','cart')$$,'P0001','Exact current ready draft required','stale approval blocked');
 update public.party_agent_workspaces set input_revision=0;
 select extensions.lives_ok($$select public.agent_v2_cart_acquire((select id from operations),'00000000-0000-0000-0000-000000000011','worker','cart')$$,'host acquires writer');
+select extensions.is((select code from public.party_agent_activity where party_id='10000000-0000-0000-0000-000000000011' order by id desc limit 1),'cart_applying','cart writer state is projected safely');
 select extensions.throws_ok($$select public.agent_v2_cart_acquire((select id from operations),'00000000-0000-0000-0000-000000000011','worker','cart')$$,'P0001','Cart operation already acquired','same worker cannot acquire twice');
 create temporary table second_operation as select public.agent_v2_approve('10000000-0000-0000-0000-000000000011','00000000-0000-0000-0000-000000000011',1,'two') as id;
 select extensions.throws_ok($$select public.agent_v2_cart_acquire((select id from second_operation),'00000000-0000-0000-0000-000000000011','worker2','cart2')$$,'P0001','Cart writer already active','one active writer for party even another cart');
@@ -33,6 +34,7 @@ update public.party_agent_workspaces set processed_source_revision=2;
 select extensions.throws_ok($$select public.agent_v2_cart_acquire((select id from second_operation),'00000000-0000-0000-0000-000000000011','worker2','cart')$$,'P0001','Cart writer already active','unknown retains writer lock');
 select public.agent_v2_cart_finish((select id from operations),'worker','verified','{"cartId":"cart","cartVersion":"v2"}',null);
 select extensions.is((select readback->>'cartId' from public.party_cart_operations where id=(select id from operations)),'cart','readback persisted');
+select extensions.is((select code from public.party_agent_activity where party_id='10000000-0000-0000-0000-000000000011' order by id desc limit 1),'cart_applied','verified cart state is projected safely');
 select extensions.lives_ok($$select public.agent_v2_cart_acquire((select id from operations),'00000000-0000-0000-0000-000000000011','worker3','cart')$$,'verified duplicate returns without writer');
 select extensions.ok(not has_function_privilege('authenticated','public.agent_v2_cart_acquire(uuid,uuid,text,text)','execute'),'authority RPC is service-only');
 select * from extensions.finish();

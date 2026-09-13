@@ -72,9 +72,10 @@ export type PartyChatMessage = {
   party_id: string;
   participant_id: string | null;
   agent_run_id: string | null;
+  recipient_id: string | null;
   role: "user" | "assistant";
   content: string;
-  status: "queued" | "running" | "completed" | "failed";
+  status: "queued" | "running" | "completed" | "failed" | "waiting_for_input" | "blocked" | "cancelled" | "superseded";
   created_at: string;
 };
 
@@ -114,7 +115,7 @@ export async function getPartyWorkspace(code: string) {
     supabase.from("party_members").select("party_id, user_id, role, display_name, email, avatar_url").eq("party_id", party.id).order("joined_at"),
     supabase.from("food_intents").select("party_id, user_id, dish_name, description, content_url, indifferent").eq("party_id", party.id),
     supabase.from("basket_items").select("id, party_id, name, quantity, unit, unit_price_cents, added_by, silpo_product_id, silpo_company_id, silpo_branch_id, silpo_product_slug, silpo_image_url, silpo_sync_status, silpo_sync_error, source, ai_proposal_id").eq("party_id", party.id).order("created_at"),
-    supabase.from("party_chat_messages").select("id, party_id, participant_id, agent_run_id, role, content, status, created_at").eq("party_id", party.id).order("created_at"),
+    supabase.from("party_chat_messages").select("id, party_id, participant_id, agent_run_id, recipient_id, role, content, status, created_at").eq("party_id", party.id).order("created_at"),
   ]);
   if (membersResult.error) throw membersResult.error;
   if (intentsResult.error) throw intentsResult.error;

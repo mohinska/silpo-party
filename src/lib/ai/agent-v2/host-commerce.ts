@@ -4,13 +4,12 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { z } from "zod";
 import { getAccessToken, SILPO_MCP_URL } from "../../silpo/oauth";
 import { createAdminClient } from "../../supabase/admin";
-import { createMcpCommerceAdapter, CommerceError, type CommerceAdapter, type ListedCommerceTool } from "./commerce-contract";
+import { createMcpCommerceAdapter, CommerceError, type CommerceAdapter, type CommerceReadAdapter, type ListedCommerceTool } from "./commerce-contract";
 
 const issuedAuthority = new WeakSet<object>();
 const authorityBrand = Symbol("verified-host-commerce-authority");
 export type VerifiedHostCommerceAuthority = { readonly scope: "approved_operation_write"; readonly hostId: string; readonly partyId: string; readonly operationId: string; readonly [authorityBrand]: true };
 export type VerifiedPartyHostCommerceAuthority = { readonly scope: "party_read"; readonly hostId: string; readonly partyId: string; readonly [authorityBrand]: true };
-export type ReadonlyCommerceAdapter = Pick<CommerceAdapter, "cart" | "search" | "details" | "substitutions">;
 export interface HostCommerceAuthorityRepository {
   resolveApprovedHost(input: { operationId: string; actorId: string }): Promise<{ partyId: string; hostId: string; approvedBy: string } | null>;
 }
@@ -85,7 +84,7 @@ export async function withVerifiedHostCommerce<T>(authority: VerifiedHostCommerc
   if (!issuedAuthority.has(authority) || authority.scope !== "approved_operation_write") throw new CommerceError("approval_required", "Verified Host authority required");
   return withAuthorityCommerce(authority, operation, parentSignal);
 }
-export async function withVerifiedPartyHostCommerce<T>(authority: VerifiedPartyHostCommerceAuthority, operation: (api: ReadonlyCommerceAdapter) => Promise<T>, parentSignal?: AbortSignal): Promise<T> {
+export async function withVerifiedPartyHostCommerce<T>(authority: VerifiedPartyHostCommerceAuthority, operation: (api: CommerceReadAdapter) => Promise<T>, parentSignal?: AbortSignal): Promise<T> {
   if (!issuedAuthority.has(authority) || authority.scope !== "party_read") throw new CommerceError("approval_required", "Verified party Host authority required");
   return withAuthorityCommerce(authority, async api => operation({ cart: api.cart, search: api.search, details: api.details, substitutions: api.substitutions }), parentSignal);
 }

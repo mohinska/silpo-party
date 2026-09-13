@@ -22,6 +22,8 @@ export function PartyRealtime({ partyId }: { partyId: string }) {
       .on("postgres_changes", { event: "*", schema: "public", table: "party_chat_messages", filter: `party_id=eq.${partyId}` }, refresh)
       .on("postgres_changes", { event: "*", schema: "public", table: "agent_runs", filter: `party_id=eq.${partyId}` }, refresh)
       .on("postgres_changes", { event: "*", schema: "public", table: "ai_meal_proposals", filter: `party_id=eq.${partyId}` }, refresh)
+      .on("postgres_changes", { event: "*", schema: "public", table: "party_agent_drafts", filter: `party_id=eq.${partyId}` }, refresh)
+      .on("postgres_changes", { event: "*", schema: "public", table: "party_agent_activity", filter: `party_id=eq.${partyId}` }, refresh)
       .subscribe();
 
     return () => {

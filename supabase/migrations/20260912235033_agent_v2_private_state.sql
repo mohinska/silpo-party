@@ -17,7 +17,7 @@ alter table public.party_chat_messages add constraint assistant_recipient_only c
 alter table public.party_chat_messages drop constraint party_chat_messages_status_check;
 alter table public.party_chat_messages add constraint party_chat_messages_status_check check (status in ('queued','running','completed','failed','waiting_for_input','blocked','cancelled','superseded'));
 alter table public.agent_runs drop constraint agent_runs_status_check;
-alter table public.agent_runs add constraint agent_runs_status_check check (status in ('queued','running','completed','failed','waiting_for_input','blocked','cancelled','superseded'));
+alter table public.agent_runs add constraint agent_runs_status_check check (status in ('queued','running','completed','completed_with_warnings','failed','waiting_for_input','blocked','cancelled','superseded'));
 
 create table public.party_agent_workspaces (
  party_id uuid primary key references public.parties(id) on delete cascade,

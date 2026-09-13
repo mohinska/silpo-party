@@ -143,3 +143,4 @@ export function createMcpCommerceAdapter(tools: ListedCommerceTool[], call: Call
   };
 }
 export type CommerceAdapter = ReturnType<typeof createMcpCommerceAdapter>;
+export type CommerceReadAdapter = Pick<CommerceAdapter, "cart" | "search" | "details" | "substitutions">;

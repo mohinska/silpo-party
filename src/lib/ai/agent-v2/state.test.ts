@@ -30,6 +30,22 @@ describe("versioned private workspace", () => {
     expect(() => applyRequestEdit(state, "a", { kind: "eaters", requestId: "r1", eaterIds: ["stranger"] })).toThrow();
     expect(() => applyRequestEdit(state, "a", { kind: "quantity", requestId: "r1", quantity: 0, unit: "g" })).toThrow();
   });
+  it("marks an indifferent participant explicitly and removes only their requests", () => {
+    let state = applyRequestEdit(createWorkspace("p", ["a", "b"]), "a", add);
+    state = applyRequestEdit(state, "b", { ...add, requestId: "r2", text: "Pasta" });
+    const next = applyRequestEdit(state, "a", { kind: "indifferent" });
+    expect(next.participants.a.submission).toBe("indifferent");
+    expect(next.participants.b.submission).toBe("submitted");
+    expect(next.requests.map(request => request.id)).toEqual(["r2"]);
+    expect(next.inputRevision).toBe(3);
+  });
+  it("upserts a trusted stable participant request across repeated submissions", () => {
+    const initial = createWorkspace("p", ["a"]);
+    const added = applyRequestEdit(initial, "a", { kind: "upsert", requestId: "primary", text: "Rice", requestKind: "dish" });
+    const replaced = applyRequestEdit(added, "a", { kind: "upsert", requestId: "primary", text: "Pasta", requestKind: "dish" });
+    expect(replaced.requests).toMatchObject([{ id: "primary", text: "Pasta", version: 2 }]);
+    expect(replaced.inputRevision).toBe(2);
+  });
   it("invalidates only transitive dependents", () => {
     const artifacts = [
       { id: "recipe", kind: "recipe" as const, version: 1, valid: true, dependsOn: ["request:r1"], evidenceRefs: [] },
